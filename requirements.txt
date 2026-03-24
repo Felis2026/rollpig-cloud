@@ -1,0 +1,7 @@
+# 本文件用于不使用 Poetry 的场景（例如直接 pip 安装或某些部署平台）。
+# 当前项目的依赖声明源仍是 pyproject.toml，修改依赖时请同步更新这里。
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+sqlalchemy>=2.0.29
+pymysql>=1.1.0
+cryptography>=42.0.0

@@ -1,0 +1,22 @@
+services:
+  rollpig_cloud:
+    build: .
+    container_name: rollpig_cloud
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:18082:8011"
+    environment:
+      ROLLPIG_CLOUD_DATABASE_URL: "mysql+pymysql://user:password@mysql:3306/rollpig_cloud?charset=utf8mb4"
+      ROLLPIG_CLOUD_TOKENS: "replace-with-token"
+      ROLLPIG_CLOUD_HOST: "0.0.0.0"
+      ROLLPIG_CLOUD_PORT: "8011"
+    mem_limit: 256m
+    cpus: 0.5
+    networks:
+      - default
+      - external_network
+
+networks:
+  external_network:
+    external: true
+    name: your_external_network

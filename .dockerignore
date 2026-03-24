@@ -1,0 +1,17 @@
+.venv
+__pycache__
+*.pyc
+.git
+.env
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.log
+*.sql
+*.sql.gz
+*.dump
+pig_data.json
+today.json
+roast_library.json
