@@ -17,7 +17,11 @@ router = APIRouter(prefix="/v1/cooldowns", tags=["cooldowns"], dependencies=[Dep
 
 @router.post("/consume-roast", response_model=ConsumeRoastResponse)
 def consume_roast(req: ConsumeRoastRequest, session: Session = Depends(get_session)):
-    now_ts = float(req.now_ts or time.time())
+    # ================================ 整数秒时间戳归一化 ================================ #
+    # MySQL FLOAT 在保存 10 位 Unix 时间戳时会发生精度丢失，进一步导致
+    # SQLAlchemy 读回来的值偏大，最终把 8h CD 算成 9h+。
+    # 这里统一改用整数秒，和数据库 BIGINT 列配套，彻底消除精度问题。
+    now_ts = int(float(req.now_ts or time.time()))
     cooldown_seconds = max(1, int(req.cooldown_seconds or 8 * 3600))
 
     for _ in range(2):
@@ -33,7 +37,7 @@ def consume_roast(req: ConsumeRoastRequest, session: Session = Depends(get_sessi
                 session.rollback()
                 continue
 
-        last_use = float(usage.last_roast_ts or 0)
+        last_use = int(usage.last_roast_ts or 0)
         remaining = max(0, int(cooldown_seconds - (now_ts - last_use)))
         if remaining > 0:
             session.rollback()

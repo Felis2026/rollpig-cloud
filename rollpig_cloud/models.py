@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy import Date, DateTime, Float, Index, String, UniqueConstraint, func
+from sqlalchemy import BIGINT, Date, DateTime, Index, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -52,7 +52,7 @@ class UserUsage(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
-    last_roast_ts: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_roast_ts: Mapped[int | None] = mapped_column(BIGINT, nullable=True)
     last_force_date: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
 

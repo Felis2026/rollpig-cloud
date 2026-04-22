@@ -135,7 +135,8 @@ def main():
         if isinstance(usage_map, dict):
             for user_id, last_roast_ts in usage_map.items():
                 usage = get_or_create_user_usage(session, usage_cache, user_id=str(user_id))
-                usage.last_roast_ts = float(last_roast_ts or 0)
+                # 统一按整数秒写入，避免旧数据导入后再次落到浮点精度坑里。
+                usage.last_roast_ts = int(float(last_roast_ts or 0))
 
         force_usage_map = data.get("force_usage", {})
         if isinstance(force_usage_map, dict):
