@@ -100,6 +100,18 @@ docker run -d \
 
 仓库中的 `docker-compose.yml.example` 需要自行设定密码和 Token。  
 
+## RollPig 静态资源包
+
+小猪资源包源文件不放在本仓库，统一维护在独立仓库 `rollpig-resources`。
+
+`rollpig-cloud` 只负责在部署环境中挂载并暴露 `/resources`，例如将外部资源目录挂载到容器内 `/app/static/resources` 后访问：
+
+```text
+https://pig.felislab.cc/resources/rollpig/manifest.json
+```
+
+这样可以避免 cloud 服务代码仓库和资源仓库重复存储图片、manifest 与构建工具。
+
 ## 迁移旧数据
 
 ```bash
