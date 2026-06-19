@@ -5,7 +5,7 @@
 ## 目标
 
 - 保存全局 `daily_roll`
-- 保存全局 `roast_cd / force_usage`
+- 保存全局 `roast_charges / force_usage`
 - 保存按群 `group_rolls / daily_summary / protection`
 - 为多 Bot 提供统一数据底座
 
@@ -117,3 +117,19 @@ https://pig.felislab.cc/resources/rollpig/manifest.json
 ```bash
 poetry run python tools/import_legacy_json.py --file /path/to/pig_data.json
 ```
+
+P1A 成长状态与普通烤群友充能可分别执行：
+
+```bash
+poetry run python tools/backfill_p1a_progress.py
+poetry run python tools/migrate_roast_charges.py
+```
+
+服务启动时也会执行轻量运行期迁移，自动为旧 `user_usage` 表补齐 `roast_charges` 与 `roast_charge_updated_ts` 列。脚本保留是为了上线前可手动确认与重复执行。
+
+## 新增接口
+
+- `GET /v1/catalog-snapshot`：按用户聚合图片版图鉴需要的成长状态、近 14 天抽猪记录与近 7 天成功被烤次数。
+- `POST /v1/cooldowns/consume-roast`：保持原地址，兼容旧 `remaining_seconds` 字段，并新增 `charges_left`、`max_charges`、`next_recover_seconds`。
+
+普通烤群友充能默认最多 2 次，每 8 小时恢复 1 次；客户端可传 `max_charges` 与 `cooldown_seconds`，服务端会做安全夹取，避免异常实例放大次数。

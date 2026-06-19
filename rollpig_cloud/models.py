@@ -86,6 +86,8 @@ class UserUsage(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
     last_roast_ts: Mapped[int | None] = mapped_column(BIGINT, nullable=True)
+    roast_charges: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    roast_charge_updated_ts: Mapped[int | None] = mapped_column(BIGINT, nullable=True)
     last_force_date: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
 

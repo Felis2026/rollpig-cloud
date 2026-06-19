@@ -24,5 +24,7 @@ def get_session():
 
 def init_db():
     from . import models  # noqa: F401
+    from .migrations import ensure_runtime_migrations
 
     Base.metadata.create_all(bind=engine)
+    ensure_runtime_migrations(engine)

@@ -62,11 +62,15 @@ class ConsumeRoastRequest(BaseModel):
     user_id: str
     now_ts: float | None = None
     cooldown_seconds: int | None = None
+    max_charges: int | None = None
 
 
 class ConsumeRoastResponse(BaseModel):
     allowed: bool
     remaining_seconds: int = 0
+    charges_left: int = 0
+    max_charges: int = 1
+    next_recover_seconds: int = 0
 
 
 class ConsumeForceRequest(BaseModel):
@@ -119,3 +123,17 @@ class CollectionResponse(BaseModel):
 
 class ActiveGroupsResponse(BaseModel):
     group_ids: list[str] = Field(default_factory=list)
+
+
+class RecentRollItem(BaseModel):
+    date_str: dt.date
+    pig_id: str
+
+
+class CatalogSnapshotResponse(BaseModel):
+    pig_ids: list[str] = Field(default_factory=list)
+    progress: dict[str, PigProgressItem] = Field(default_factory=dict)
+    duplicate_streak: int = 0
+    recent_rolls: list[RecentRollItem] = Field(default_factory=list)
+    roasted_7d: int = 0
+    roast_events_7d: int = 0
