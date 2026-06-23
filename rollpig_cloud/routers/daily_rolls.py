@@ -9,18 +9,11 @@ from sqlalchemy.orm import Session
 
 from ..auth import verify_token
 from ..db import get_session
-from ..models import Collection, DailyRoll, GroupRoll
+from ..models import DailyRoll, GroupRoll
 from ..schemas import DailyRollGetOrCreateRequest, DailyRollItem, DailyRollListResponse, DailyRollLookupResponse
+from ..services.progress import apply_created_roll_progress, build_lookup_response
 
 router = APIRouter(prefix="/v1/daily-rolls", tags=["daily-rolls"], dependencies=[Depends(verify_token)])
-
-
-def _ensure_collection(session: Session, user_id: str, pig_id: str) -> None:
-    exists = session.execute(
-        select(Collection).where(Collection.user_id == user_id, Collection.pig_id == pig_id)
-    ).scalar_one_or_none()
-    if not exists:
-        session.add(Collection(user_id=user_id, pig_id=pig_id))
 
 
 def _ensure_group_roll(session: Session, group_id: str, user_id: str, pig_id: str, date_str: dt.date) -> None:
@@ -48,15 +41,25 @@ def get_or_create_daily_roll(req: DailyRollGetOrCreateRequest, session: Session 
     if existing:
         _ensure_group_roll(session, req.group_id, req.user_id, existing.pig_id, req.date_str)
         session.commit()
-        return DailyRollLookupResponse(pig_id=existing.pig_id, created=False)
+        return build_lookup_response(session, user_id=req.user_id, pig_id=existing.pig_id, created=False)
 
     try:
         created = DailyRoll(user_id=req.user_id, pig_id=req.proposed_pig_id, date_str=req.date_str)
         session.add(created)
-        _ensure_collection(session, req.user_id, req.proposed_pig_id)
+        is_new_pig, previous_copies, previous_duplicate_streak = apply_created_roll_progress(
+            session, req.user_id, req.proposed_pig_id
+        )
         _ensure_group_roll(session, req.group_id, req.user_id, req.proposed_pig_id, req.date_str)
         session.commit()
-        return DailyRollLookupResponse(pig_id=req.proposed_pig_id, created=True)
+        return build_lookup_response(
+            session,
+            user_id=req.user_id,
+            pig_id=req.proposed_pig_id,
+            created=True,
+            is_new_pig=is_new_pig,
+            previous_copies=previous_copies,
+            previous_duplicate_streak=previous_duplicate_streak,
+        )
     except IntegrityError:
         session.rollback()
         existing = session.execute(
@@ -64,7 +67,7 @@ def get_or_create_daily_roll(req: DailyRollGetOrCreateRequest, session: Session 
         ).scalar_one()
         _ensure_group_roll(session, req.group_id, req.user_id, existing.pig_id, req.date_str)
         session.commit()
-        return DailyRollLookupResponse(pig_id=existing.pig_id, created=False)
+        return build_lookup_response(session, user_id=req.user_id, pig_id=existing.pig_id, created=False)
 
 
 @router.get("/by-date", response_model=DailyRollLookupResponse)
@@ -72,7 +75,9 @@ def get_daily_roll_by_date(user_id: str, date_str: dt.date, session: Session = D
     existing = session.execute(
         select(DailyRoll).where(DailyRoll.user_id == user_id, DailyRoll.date_str == date_str)
     ).scalar_one_or_none()
-    return DailyRollLookupResponse(pig_id=existing.pig_id if existing else None, created=False)
+    if not existing:
+        return DailyRollLookupResponse(pig_id=None, created=False)
+    return build_lookup_response(session, user_id=user_id, pig_id=existing.pig_id, created=False)
 
 
 @router.get("/all", response_model=DailyRollListResponse)

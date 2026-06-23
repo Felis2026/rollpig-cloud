@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy import BIGINT, Date, DateTime, Index, String, UniqueConstraint, func
+from sqlalchemy import BIGINT, Date, DateTime, Index, Integer, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -45,6 +45,39 @@ class Collection(Base):
     user_id: Mapped[str] = mapped_column(String(64), nullable=False)
     pig_id: Mapped[str] = mapped_column(String(128), nullable=False)
     first_seen_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+
+
+# ================================ P1A成长状态 ================================ #
+# 先把重复抽猪成长数据独立成新表，不改旧主表结构，便于平滑上线和回滚。
+# tenant_id 当前统一使用默认租户，避免后续内部扩展时改动既有表结构主键。
+class UserPigProgress(Base):
+    __tablename__ = "user_pig_progress"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "user_id", "pig_id", name="uq_user_pig_progress_tenant_user_pig"),
+        Index("ix_user_pig_progress_tenant_user", "tenant_id", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    pig_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    copies: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    first_obtained_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class UserDrawState(Base):
+    __tablename__ = "user_draw_state"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "user_id", name="uq_user_draw_state_tenant_user"),
+        Index("ix_user_draw_state_tenant_user", "tenant_id", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    duplicate_streak: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
 
 
 class UserUsage(Base):

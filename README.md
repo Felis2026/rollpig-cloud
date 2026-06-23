@@ -15,6 +15,7 @@
 - `ROLLPIG_CLOUD_TOKENS`：Bearer Token，多个用逗号分隔
 - `ROLLPIG_CLOUD_HOST`：默认 `0.0.0.0`
 - `ROLLPIG_CLOUD_PORT`：默认 `8011`
+- `ROLLPIG_CLOUD_DEFAULT_TENANT_ID`：默认 `felis-main`，P1A 成长状态使用的默认租户
 
 ## 运行依赖
 
@@ -72,6 +73,7 @@ cp docker-compose.yml.example docker-compose.yml
 environment:
   ROLLPIG_CLOUD_DATABASE_URL: "mysql+pymysql://user:password@127.0.0.1:3306/rollpig_cloud?charset=utf8mb4"
   ROLLPIG_CLOUD_TOKENS: "replace-with-token"
+  ROLLPIG_CLOUD_DEFAULT_TENANT_ID: "felis-main"
 ```
 
 3. 启动服务：

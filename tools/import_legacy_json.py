@@ -15,8 +15,18 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from sqlalchemy import select
 
+from rollpig_cloud.config import settings
 from rollpig_cloud.db import SessionLocal, init_db
-from rollpig_cloud.models import Collection, DailyRoll, GroupProtection, GroupRoll, RoastEvent, UserUsage
+from rollpig_cloud.models import (
+    Collection,
+    DailyRoll,
+    GroupProtection,
+    GroupRoll,
+    RoastEvent,
+    UserDrawState,
+    UserPigProgress,
+    UserUsage,
+)
 
 
 def parse_date(value: str) -> dt.date:
@@ -76,6 +86,44 @@ def get_or_create_user_usage(session, usage_cache: dict[str, UserUsage], *, user
     return usage
 
 
+def ensure_pig_progress(session, *, user_id: str, pig_id: str, first_seen_at: dt.datetime | None = None) -> None:
+    """Backfill P1A progress from legacy collection rows without overwriting real copies."""
+    existing = session.execute(
+        select(UserPigProgress).where(
+            UserPigProgress.tenant_id == settings.default_tenant_id,
+            UserPigProgress.user_id == str(user_id),
+            UserPigProgress.pig_id == str(pig_id),
+        )
+    ).scalar_one_or_none()
+    if existing:
+        return
+    progress_kwargs = {}
+    if first_seen_at is not None:
+        progress_kwargs["first_obtained_at"] = first_seen_at
+    session.add(
+        UserPigProgress(
+            tenant_id=settings.default_tenant_id,
+            user_id=str(user_id),
+            pig_id=str(pig_id),
+            copies=1,
+            **progress_kwargs,
+        )
+    )
+
+
+def ensure_draw_state(session, *, user_id: str) -> None:
+    """Initialize duplicate_streak to 0 because legacy data cannot reconstruct consecutive repeats."""
+    existing = session.execute(
+        select(UserDrawState).where(
+            UserDrawState.tenant_id == settings.default_tenant_id,
+            UserDrawState.user_id == str(user_id),
+        )
+    ).scalar_one_or_none()
+    if existing:
+        return
+    session.add(UserDrawState(tenant_id=settings.default_tenant_id, user_id=str(user_id), duplicate_streak=0))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Import legacy pig_data.json into rollpig-cloud")
     parser.add_argument("--file", required=True, help="legacy pig_data.json path")
@@ -129,7 +177,15 @@ def main():
                     select(Collection).where(Collection.user_id == str(user_id), Collection.pig_id == str(pig_id))
                 ).scalar_one_or_none()
                 if not existing:
-                    session.add(Collection(user_id=str(user_id), pig_id=str(pig_id)))
+                    existing = Collection(user_id=str(user_id), pig_id=str(pig_id))
+                    session.add(existing)
+                ensure_pig_progress(
+                    session,
+                    user_id=str(user_id),
+                    pig_id=str(pig_id),
+                    first_seen_at=existing.first_seen_at,
+                )
+                ensure_draw_state(session, user_id=str(user_id))
 
         usage_map = data.get("usage", {})
         if isinstance(usage_map, dict):

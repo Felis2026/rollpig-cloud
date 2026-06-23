@@ -15,6 +15,22 @@ class DailyRollGetOrCreateRequest(BaseModel):
 class DailyRollLookupResponse(BaseModel):
     pig_id: str | None = None
     created: bool = False
+    is_new_pig: bool = False
+    previous_copies: int = 0
+    copies: int = 0
+    previous_duplicate_streak: int = 0
+    duplicate_streak: int = 0
+
+
+class PigProgressItem(BaseModel):
+    copies: int = 0
+    first_obtained_at: dt.datetime | None = None
+
+
+class DrawStateResponse(BaseModel):
+    pig_ids: list[str] = Field(default_factory=list)
+    progress: dict[str, PigProgressItem] = Field(default_factory=dict)
+    duplicate_streak: int = 0
 
 
 class DailyRollItem(BaseModel):

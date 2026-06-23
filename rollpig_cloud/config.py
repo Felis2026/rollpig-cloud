@@ -13,6 +13,7 @@ class Settings:
         self.tokens = {token.strip() for token in tokens_raw.split(",") if token.strip()}
         self.host = os.getenv("ROLLPIG_CLOUD_HOST", "0.0.0.0")
         self.port = int(os.getenv("ROLLPIG_CLOUD_PORT", "8011"))
+        self.default_tenant_id = os.getenv("ROLLPIG_CLOUD_DEFAULT_TENANT_ID", "felis-main")
 
 
 settings = Settings()

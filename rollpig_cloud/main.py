@@ -6,6 +6,7 @@ from .db import init_db
 from .routers.collections import router as collections_router
 from .routers.cooldowns import router as cooldowns_router
 from .routers.daily_rolls import router as daily_rolls_router
+from .routers.draw_state import router as draw_state_router
 from .routers.events import router as events_router
 from .routers.group_rolls import router as group_rolls_router
 from .routers.groups import router as groups_router
@@ -25,6 +26,7 @@ def healthz():
 
 
 app.include_router(daily_rolls_router)
+app.include_router(draw_state_router)
 app.include_router(group_rolls_router)
 app.include_router(collections_router)
 app.include_router(cooldowns_router)
