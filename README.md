@@ -84,7 +84,7 @@ ROLLPIG_DEPLOY_KNOWN_HOSTS
 
 可选在 `production` Environment 中配置变量 `ROLLPIG_DEPLOY_PUBLIC_URL`，例如 `https://pig.felislab.cc/healthz`，用于部署完成后验证公网反向代理链路。
 
-工作流不会上传 `docker-compose.yml`、Token、数据库地址或资源目录。服务器上的生产配置和资源由宿主机继续保管，GitHub 仅同步可公开的 Cloud 代码与依赖描述。
+工作流不会上传 `docker-compose.yml`、Token、数据库地址或资源目录。服务器上的生产配置和资源由宿主机继续保管，GitHub 仅同步可公开的 Cloud 代码、部署脚本与依赖描述。
 
 如果需要调整端口、容器名、内存限制或外部 Docker 网络，在 `docker-compose.yml` 中修改后执行：
 

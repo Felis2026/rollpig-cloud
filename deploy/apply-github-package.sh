@@ -34,7 +34,7 @@ rm -rf "$staging_dir" "$backup_dir"
 mkdir -p "$staging_dir" "$backup_dir"
 tar -xzf "$archive_path" -C "$staging_dir"
 
-for required_path in rollpig_cloud tools Dockerfile requirements.lock; do
+for required_path in rollpig_cloud tools deploy/apply-github-package.sh deploy/healthcheck.sh Dockerfile requirements.lock; do
     if [ ! -e "$staging_dir/$required_path" ]; then
         echo "deployment package missing: $required_path" >&2
         exit 2
@@ -44,6 +44,7 @@ done
 # ================================ 新代码预检与依赖构建 ================================ #
 
 docker run --rm \
+    -e PYTHONPYCACHEPREFIX=/tmp/rollpig-pycache \
     -v "$staging_dir/rollpig_cloud:/src/rollpig_cloud:ro" \
     -v "$staging_dir/tools:/src/tools:ro" \
     --entrypoint python \
@@ -73,10 +74,10 @@ fi
 
 # ================================ 原子切换与失败回滚 ================================ #
 
-mv "$project_dir/rollpig_cloud" "$backup_dir/rollpig_cloud"
-mv "$project_dir/tools" "$backup_dir/tools"
-mv "$staging_dir/rollpig_cloud" "$project_dir/rollpig_cloud"
-mv "$staging_dir/tools" "$project_dir/tools"
+for directory in rollpig_cloud tools deploy; do
+    mv "$project_dir/$directory" "$backup_dir/$directory"
+    mv "$staging_dir/$directory" "$project_dir/$directory"
+done
 
 if docker compose -f "$project_dir/docker-compose.yml" up -d --no-build --no-deps --force-recreate "$service_name" && \
    sh "$project_dir/deploy/healthcheck.sh" "$service_name"; then
@@ -87,9 +88,10 @@ if docker compose -f "$project_dir/docker-compose.yml" up -d --no-build --no-dep
 fi
 
 echo "rollpig-cloud deployment failed, rolling back: revision=$revision" >&2
-rm -rf "$project_dir/rollpig_cloud" "$project_dir/tools"
-mv "$backup_dir/rollpig_cloud" "$project_dir/rollpig_cloud"
-mv "$backup_dir/tools" "$project_dir/tools"
+for directory in rollpig_cloud tools deploy; do
+    rm -rf "$project_dir/$directory"
+    mv "$backup_dir/$directory" "$project_dir/$directory"
+done
 cp "$backup_dir/Dockerfile" "$project_dir/Dockerfile"
 cp "$backup_dir/requirements.lock" "$project_dir/requirements.lock"
 docker tag "$old_image_id" "$image_name"

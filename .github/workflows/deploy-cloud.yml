@@ -7,6 +7,7 @@ on:
     paths:
       - "rollpig_cloud/**"
       - "tools/**"
+      - "deploy/**"
       - "Dockerfile"
       - "requirements.lock"
       - "requirements.txt"
@@ -60,7 +61,7 @@ jobs:
       - name: Build deployment package
         run: |
           tar -czf "/tmp/rollpig-cloud-${GITHUB_SHA}.tar.gz" \
-            rollpig_cloud tools Dockerfile requirements.lock requirements.txt
+            rollpig_cloud tools deploy Dockerfile requirements.lock requirements.txt
 
       - name: Configure SSH
         run: |
