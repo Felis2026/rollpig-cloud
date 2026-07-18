@@ -34,9 +34,28 @@ jobs:
   deploy:
     needs: validate
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment: production
+    env:
+      DEPLOY_HOST: ${{ secrets.ROLLPIG_DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ secrets.ROLLPIG_DEPLOY_PORT }}
+      DEPLOY_USER: ${{ secrets.ROLLPIG_DEPLOY_USER }}
+      DEPLOY_ROOT: ${{ secrets.ROLLPIG_DEPLOY_ROOT }}
+      DEPLOY_SSH_KEY: ${{ secrets.ROLLPIG_DEPLOY_SSH_KEY }}
+      DEPLOY_KNOWN_HOSTS: ${{ secrets.ROLLPIG_DEPLOY_KNOWN_HOSTS }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Validate deployment secrets
+        shell: bash
+        run: |
+          set -eu
+          for name in DEPLOY_HOST DEPLOY_PORT DEPLOY_USER DEPLOY_ROOT DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS; do
+            if [ -z "${!name:-}" ]; then
+              echo "Missing GitHub Actions secret: $name" >&2
+              exit 1
+            fi
+          done
 
       - name: Build deployment package
         run: |
@@ -44,30 +63,28 @@ jobs:
             rollpig_cloud tools Dockerfile requirements.lock requirements.txt
 
       - name: Configure SSH
-        env:
-          DEPLOY_SSH_KEY: ${{ secrets.ROLLPIG_DEPLOY_SSH_KEY }}
-          DEPLOY_KNOWN_HOSTS: ${{ secrets.ROLLPIG_DEPLOY_KNOWN_HOSTS }}
         run: |
           install -d -m 700 ~/.ssh
-          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$DEPLOY_SSH_KEY" | tr -d '\r' > ~/.ssh/id_ed25519
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
 
       - name: Upload deployment package
-        env:
-          DEPLOY_HOST: ${{ secrets.ROLLPIG_DEPLOY_HOST }}
-          DEPLOY_PORT: ${{ secrets.ROLLPIG_DEPLOY_PORT }}
-          DEPLOY_USER: ${{ secrets.ROLLPIG_DEPLOY_USER }}
         run: |
           scp -P "$DEPLOY_PORT" \
             "/tmp/rollpig-cloud-${GITHUB_SHA}.tar.gz" \
             "$DEPLOY_USER@$DEPLOY_HOST:/tmp/rollpig-cloud-${GITHUB_SHA}.tar.gz"
 
       - name: Deploy and verify
-        env:
-          DEPLOY_HOST: ${{ secrets.ROLLPIG_DEPLOY_HOST }}
-          DEPLOY_PORT: ${{ secrets.ROLLPIG_DEPLOY_PORT }}
-          DEPLOY_USER: ${{ secrets.ROLLPIG_DEPLOY_USER }}
         run: |
           ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
-            "sh /root/rollpig-cloud/deploy/apply-github-package.sh '/tmp/rollpig-cloud-${GITHUB_SHA}.tar.gz' '${GITHUB_SHA}'"
+            "sh '$DEPLOY_ROOT/deploy/apply-github-package.sh' '/tmp/rollpig-cloud-${GITHUB_SHA}.tar.gz' '${GITHUB_SHA}'"
+
+      - name: Verify public Cloud
+        if: ${{ vars.ROLLPIG_DEPLOY_PUBLIC_URL != '' }}
+        env:
+          DEPLOY_PUBLIC_URL: ${{ vars.ROLLPIG_DEPLOY_PUBLIC_URL }}
+        run: |
+          curl --fail --silent --show-error \
+            --retry 5 --retry-delay 3 \
+            "$DEPLOY_PUBLIC_URL" > /dev/null
