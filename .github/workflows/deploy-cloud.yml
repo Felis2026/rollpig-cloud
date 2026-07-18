@@ -1,0 +1,73 @@
+name: Deploy rollpig-cloud
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "rollpig_cloud/**"
+      - "tools/**"
+      - "Dockerfile"
+      - "requirements.lock"
+      - "requirements.txt"
+      - ".github/workflows/deploy-cloud.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: rollpig-cloud-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Validate Python syntax
+        run: python -m compileall -q rollpig_cloud tools
+
+  deploy:
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build deployment package
+        run: |
+          tar -czf "/tmp/rollpig-cloud-${GITHUB_SHA}.tar.gz" \
+            rollpig_cloud tools Dockerfile requirements.lock requirements.txt
+
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.ROLLPIG_DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.ROLLPIG_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Upload deployment package
+        env:
+          DEPLOY_HOST: ${{ secrets.ROLLPIG_DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.ROLLPIG_DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.ROLLPIG_DEPLOY_USER }}
+        run: |
+          scp -P "$DEPLOY_PORT" \
+            "/tmp/rollpig-cloud-${GITHUB_SHA}.tar.gz" \
+            "$DEPLOY_USER@$DEPLOY_HOST:/tmp/rollpig-cloud-${GITHUB_SHA}.tar.gz"
+
+      - name: Deploy and verify
+        env:
+          DEPLOY_HOST: ${{ secrets.ROLLPIG_DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.ROLLPIG_DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.ROLLPIG_DEPLOY_USER }}
+        run: |
+          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "sh /root/rollpig-cloud/deploy/apply-github-package.sh '/tmp/rollpig-cloud-${GITHUB_SHA}.tar.gz' '${GITHUB_SHA}'"

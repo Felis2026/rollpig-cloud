@@ -1,8 +1,17 @@
 services:
   rollpig_cloud:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rollpig-cloud:0.2.0-runtime
     container_name: rollpig_cloud
     restart: unless-stopped
+    volumes:
+      # 源码挂载让 Python 代码更新只需重启；依赖变化时才重新 build。
+      - ./rollpig_cloud:/app/rollpig_cloud:ro
+      - ./tools:/app/tools:ro
+      # 资源包由 rollpig-resources 独立发布，不进入 Cloud 镜像。
+      - ./static/resources:/app/static/resources:ro
     ports:
       - "127.0.0.1:18082:8011"
     environment:

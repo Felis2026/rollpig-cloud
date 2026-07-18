@@ -2,7 +2,10 @@
 __pycache__
 *.pyc
 .git
+.github
+.deploy
 .env
+.env.*
 *.pem
 *.key
 *.crt
@@ -15,3 +18,5 @@ __pycache__
 pig_data.json
 today.json
 roast_library.json
+static
+docker-compose.yml

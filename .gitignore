@@ -2,6 +2,9 @@
 # 真实部署参数只放在本地 `docker-compose.yml`，公开仓库中只提交 `docker-compose.yml.example`。
 docker-compose.yml
 .env
+.env.*
+static/
+.deploy/
 
 # ================================ Python 运行缓存 ================================ #
 __pycache__/
