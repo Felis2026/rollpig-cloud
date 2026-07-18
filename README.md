@@ -1,18 +1,44 @@
-# rollpig-cloud
+<div align="center">
+  <img src="https://raw.githubusercontent.com/Felis2026/nonebot-plugin-rollpig-plus/refs/heads/main/docs/assets/logo.jpeg" width="180" alt="RollPig Logo">
 
-`rollpig-cloud` 是 [nonebot-plugin-rollpig-plus](https://github.com/Felis2026/nonebot-plugin-rollpig-plus) 的云端存储、状态同步与静态资源托管服务。
+  <h1>🐖 RollPig Cloud 🐖</h1>
 
-它负责把多个 Bot 实例的抽猪记录、图鉴成长、烤群友充能、群内日报与资源包访问统一到同一个后端。
+  <p><strong>RollPig Plus 的可选云端服务</strong></p>
+  <p>统一存储多 Bot 的成长状态与群数据，并托管上游原版和 RollPig Plus 使用的静态资源。</p>
 
-## 功能概述
+  <p>
+    <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python >= 3.10">
+    <img src="https://img.shields.io/badge/FastAPI-0.110%2B-009688" alt="FastAPI >= 0.110">
+    <img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License">
+  </p>
+</div>
+
+<p align="center">
+  <a href="https://github.com/Bearlele/nonebot-plugin-rollpig">上游原作</a> ·
+  <a href="https://github.com/Felis2026/nonebot-plugin-rollpig-plus">Plus</a> ·
+  <a href="https://github.com/Felis2026/rollpig-cloud">Cloud</a> ·
+  <a href="https://github.com/Felis2026/rollpig-resources">Resources</a>
+</p>
+
+> **什么时候需要部署？** 单 Bot 使用本地存储时不需要 RollPig Cloud。只有多个 Bot 需要共享抽猪记录、图鉴成长、烤群友充能或群日报状态时，才需要启用云端存储。
+
+## ✨ 功能概述
 
 - **多 Bot 状态同步**：保存 `daily_rolls`、`draw_state`、`collections` 等用户成长数据。
 - **群维度数据**：保存 `group_rolls`、群保护状态、活跃群列表与日报所需聚合数据。
 - **烤群友充能**：为普通烤群友提供服务端次数存储与冷却恢复。
-- **图鉴快照接口**：为 rollpig-plus 图片版图鉴聚合收藏、近 14 天抽猪与近 7 天被烤数据。
+- **图鉴快照接口**：为 RollPig Plus 图片版图鉴聚合收藏、近 14 天抽猪与近 7 天被烤数据。
 - **静态资源托管**：通过 `/resources/...` 暴露来自 `rollpig-resources` 的远端资源包。
 
-## 环境变量
+### 组件关系
+
+| 访问方 | 接口或路径 | 用途 |
+| --- | --- | --- |
+| RollPig Plus | `/v1/...` | 多 Bot 用户状态、群数据与充能同步 |
+| 上游原版 / RollPig Plus | `/resources/...` | 公有小猪资源与官方 Overlay 下载 |
+| RollPig Cloud | MySQL | 持久化用户状态、群事件与聚合数据 |
+
+## ⚙️ 环境变量
 
 | 变量名 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -32,7 +58,7 @@ Authorization: Bearer <ROLLPIG_CLOUD_TOKENS 中的某个 Token>
 
 `ROLLPIG_CLOUD_DEFAULT_TENANT_ID` 是数据租户命名空间，不是资源包名称。当前代码默认值是 `felis-main`，用于兼容 Felis 现有部署；自建服务可以改成自己的 ID。已有数据上线后不要随意更换，否则客户端会像切到新租户一样看不到旧成长数据。
 
-## 快速部署
+## 🚀 快速部署
 
 ### Docker Compose（推荐）
 
@@ -122,7 +148,7 @@ docker run -d \
   rollpig-cloud
 ```
 
-## API 路由表
+## 🧭 API 路由表
 
 ### 健康检查
 
@@ -165,7 +191,7 @@ docker run -d \
 | `POST` | `/v1/protections/replace-group` | 替换群保护名单 |
 | `GET` | `/v1/protections/check` | 检查用户是否在群保护名单中 |
 
-## 数据迁移
+## 🔄 数据迁移
 
 从旧本地 JSON 导入云端：
 
@@ -182,7 +208,7 @@ poetry run python tools/migrate_roast_charges.py
 
 服务启动时也会执行轻量运行期迁移，自动为旧 `user_usage` 表补齐 `roast_charges` 与 `roast_charge_updated_ts` 列。脚本保留是为了上线前可手动确认与重复执行。
 
-## 静态资源包
+## 📦 静态资源包
 
 小猪资源包源文件不放在本仓库，统一维护在 [rollpig-resources](https://github.com/Felis2026/rollpig-resources)。
 
@@ -195,13 +221,13 @@ https://pig.felislab.cc/resources/rollpig-pjsk/manifest.json
 
 这样可以避免 cloud 服务代码仓库和资源仓库重复存储图片、manifest 与构建工具。
 
-## 相关项目
+## 🔗 相关项目
 
-- PLUS 拓展版插件：[Felis2026/nonebot-plugin-rollpig-plus](https://github.com/Felis2026/nonebot-plugin-rollpig-plus)
-- 云端资源包：[Felis2026/rollpig-resources](https://github.com/Felis2026/rollpig-resources)
-- 原作插件：[Bearlele/nonebot-plugin-rollpig](https://github.com/Bearlele/nonebot-plugin-rollpig)
+- 上游原作：[Bearlele/nonebot-plugin-rollpig](https://github.com/Bearlele/nonebot-plugin-rollpig)
+- RollPig Plus：[Felis2026/nonebot-plugin-rollpig-plus](https://github.com/Felis2026/nonebot-plugin-rollpig-plus)
+- 小猪资源包：[Felis2026/rollpig-resources](https://github.com/Felis2026/rollpig-resources)
 - PigHub：[pighub.top](https://pighub.top/)
 
-## 许可证
+## 📄 许可证
 
 本项目使用 MIT License，详见 [LICENSE](./LICENSE)。
