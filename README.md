@@ -29,6 +29,7 @@
 - **烤群友充能**：为普通烤群友提供服务端次数存储与冷却恢复。
 - **图鉴快照接口**：为 RollPig Plus 图片版图鉴聚合收藏、近 14 天抽猪与近 7 天被烤数据。
 - **静态资源托管**：通过 `/resources/...` 暴露来自 `rollpig-resources` 的远端资源包。
+- **共享文案托管**：通过 `/resources/rollpig-roasts/...` 提供审核后的只读烤猪文案，不进入数据库。
 
 ### 组件关系
 
@@ -36,6 +37,7 @@
 | --- | --- | --- |
 | RollPig Plus | `/v1/...` | 多 Bot 用户状态、群数据与充能同步 |
 | 上游原版 / RollPig Plus | `/resources/...` | 公有小猪资源与官方 Overlay 下载 |
+| RollPig Plus 0.10.0+ | `/resources/rollpig-roasts/...` | 共享烤猪文案快照下载 |
 | RollPig Cloud | MySQL | 持久化用户状态、群事件与聚合数据 |
 
 ## ⚙️ 环境变量
@@ -216,7 +218,9 @@ poetry run python tools/migrate_roast_charges.py
 
 ```text
 https://pig.felislab.cc/resources/rollpig/manifest.json
+https://pig.felislab.cc/resources/rollpig-gif/manifest.json
 https://pig.felislab.cc/resources/rollpig-pjsk/manifest.json
+https://pig.felislab.cc/resources/rollpig-roasts/manifest.json
 ```
 
 这样可以避免 cloud 服务代码仓库和资源仓库重复存储图片、manifest 与构建工具。
