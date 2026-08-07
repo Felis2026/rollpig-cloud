@@ -27,6 +27,12 @@ def create_event(req: EventCreateRequest, session: Session = Depends(get_session
             attacker_name=req.attacker_name,
             target_name=req.target_name,
             food_name=req.food,
+            reservation_id=req.reservation_id,
+            participant_snapshot={
+                "ids": req.participant_ids,
+                "names": req.participant_names,
+                "count": req.participant_count,
+            } if req.reservation_id else None,
         )
     )
     session.commit()
@@ -49,6 +55,10 @@ def list_events(date_str: dt.date, group_id: str | None = None, session: Session
                 target_name=row.target_name,
                 food=row.food_name,
                 group_id=row.group_id,
+                reservation_id=row.reservation_id,
+                participant_ids=(row.participant_snapshot or {}).get("ids", []),
+                participant_names=(row.participant_snapshot or {}).get("names", []),
+                participant_count=int((row.participant_snapshot or {}).get("count", 0)),
             )
             for row in rows
         ]

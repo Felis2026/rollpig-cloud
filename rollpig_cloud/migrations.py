@@ -58,14 +58,19 @@ def ensure_runtime_migrations(engine: Engine) -> None:
     """执行轻量运行期迁移，专门兜底 SQLAlchemy create_all 不会补旧表列的问题。"""
     inspector = inspect(engine)
     table_names = set(inspector.get_table_names())
-    if "user_usage" not in table_names:
-        return
+    if "user_usage" in table_names:
+        existing_columns = {column["name"] for column in inspector.get_columns("user_usage")}
+        with engine.begin() as conn:
+            if "roast_charges" not in existing_columns:
+                conn.execute(text(_add_column_sql("user_usage", "roast_charges", "INTEGER NULL")))
+            if "roast_charge_updated_ts" not in existing_columns:
+                conn.execute(text(_add_column_sql("user_usage", "roast_charge_updated_ts", "BIGINT NULL")))
+        _migrate_existing_user_usage(engine)
 
-    existing_columns = {column["name"] for column in inspector.get_columns("user_usage")}
-    with engine.begin() as conn:
-        if "roast_charges" not in existing_columns:
-            conn.execute(text(_add_column_sql("user_usage", "roast_charges", "INTEGER NULL")))
-        if "roast_charge_updated_ts" not in existing_columns:
-            conn.execute(text(_add_column_sql("user_usage", "roast_charge_updated_ts", "BIGINT NULL")))
-
-    _migrate_existing_user_usage(engine)
+    if "roast_events" in table_names:
+        event_columns = {column["name"] for column in inspect(engine).get_columns("roast_events")}
+        with engine.begin() as conn:
+            if "reservation_id" not in event_columns:
+                conn.execute(text(_add_column_sql("roast_events", "reservation_id", "VARCHAR(64) NOT NULL DEFAULT ''")))
+            if "participant_snapshot" not in event_columns:
+                conn.execute(text(_add_column_sql("roast_events", "participant_snapshot", "JSON NULL")))

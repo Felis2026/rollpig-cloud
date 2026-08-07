@@ -91,6 +91,10 @@ class EventCreateRequest(BaseModel):
     food: str = ""
     group_id: str = ""
     date_str: dt.date | None = None
+    reservation_id: str = ""
+    participant_ids: list[str] = Field(default_factory=list)
+    participant_names: list[str] = Field(default_factory=list)
+    participant_count: int = 0
 
 
 class EventItem(BaseModel):
@@ -101,6 +105,10 @@ class EventItem(BaseModel):
     target_name: str = ""
     food: str = ""
     group_id: str = ""
+    reservation_id: str = ""
+    participant_ids: list[str] = Field(default_factory=list)
+    participant_names: list[str] = Field(default_factory=list)
+    participant_count: int = 0
 
 
 class EventListResponse(BaseModel):
@@ -137,3 +145,93 @@ class CatalogSnapshotResponse(BaseModel):
     recent_rolls: list[RecentRollItem] = Field(default_factory=list)
     roasted_7d: int = 0
     roast_events_7d: int = 0
+
+
+# ================================ 预约烤猪 API ================================ #
+
+class UnrolledRoastAttemptRequest(BaseModel):
+    user_id: str
+    date_str: dt.date
+
+
+class UnrolledRoastAttemptResponse(BaseModel):
+    user_id: str
+    date_str: dt.date
+    count: int
+
+
+class RoastReservationParticipantItem(BaseModel):
+    user_id: str
+    display_name: str = ""
+    pig_id: str = ""
+
+
+class RoastReservationItem(BaseModel):
+    reservation_id: str
+    date_str: dt.date
+    group_id: str
+    target_id: str
+    target_name: str = ""
+    target_pig_id: str = ""
+    owner_id: str
+    owner_name: str = ""
+    owner_pig_id: str
+    participants: list[RoastReservationParticipantItem] = Field(default_factory=list)
+    delivery_bot_id: str
+    force_mode: str | None = None
+    status: str
+    outcome_snapshot: dict | None = None
+    claim_token: str = ""
+
+
+class RoastReservationPrepareRequest(BaseModel):
+    attacker_id: str
+    attacker_name: str = ""
+    attacker_pig_id: str
+    target_id: str
+    target_name: str = ""
+    group_id: str
+    delivery_bot_id: str
+    force_mode: str | None = None
+    date_str: dt.date
+    now_ts: float | None = None
+    cooldown_seconds: int | None = None
+    max_charges: int | None = None
+
+
+class RoastReservationPrepareResponse(BaseModel):
+    status: str
+    reservation: RoastReservationItem | None = None
+    cooldown: ConsumeRoastResponse | None = None
+    target_pig_id: str = ""
+    protection_broken: bool = False
+
+
+class RoastReservationOwnedResponse(BaseModel):
+    has_owned: bool
+
+
+class RoastReservationClaimRequest(BaseModel):
+    delivery_bot_id: str
+    date_str: dt.date
+    limit: int = 12
+
+
+class RoastReservationClaimResponse(BaseModel):
+    items: list[RoastReservationItem] = Field(default_factory=list)
+
+
+class RoastReservationOutcomeRequest(BaseModel):
+    reservation_id: str
+    claim_token: str
+    outcome_snapshot: dict
+
+
+class RoastReservationMutationRequest(BaseModel):
+    reservation_id: str
+    claim_token: str
+
+
+class RoastReservationMutationResponse(BaseModel):
+    ok: bool
+    reservation: RoastReservationItem | None = None
