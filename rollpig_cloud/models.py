@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy import BIGINT, Date, DateTime, Index, Integer, String, UniqueConstraint, func
+from sqlalchemy import BIGINT, JSON, Date, DateTime, Index, Integer, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -105,6 +105,8 @@ class RoastEvent(Base):
     attacker_name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
     target_name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
     food_name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    reservation_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    participant_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
 
@@ -120,3 +122,63 @@ class GroupProtection(Base):
     group_id: Mapped[str] = mapped_column(String(64), nullable=False)
     user_id: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+
+
+# ================================ 预约烤猪状态 ================================ #
+# Cloud 只保存并发协调与结果快照，不在服务端执行概率、文案或图片渲染。
+class UnrolledRoastAttempt(Base):
+    __tablename__ = "unrolled_roast_attempts"
+    __table_args__ = (
+        UniqueConstraint("date_str", "user_id", name="uq_unrolled_roast_attempt_date_user"),
+        Index("ix_unrolled_roast_attempts_date", "date_str"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    date_str: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class RoastReservation(Base):
+    __tablename__ = "roast_reservations"
+    __table_args__ = (
+        UniqueConstraint("date_str", "group_id", "target_id", name="uq_roast_reservation_date_group_target"),
+        Index("ix_roast_reservations_target_status", "date_str", "target_id", "status"),
+        Index("ix_roast_reservations_delivery_status", "date_str", "delivery_bot_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    reservation_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    date_str: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    group_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    target_pig_id: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    owner_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    owner_name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    owner_pig_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    delivery_bot_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    force_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    outcome_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    claim_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    ready_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    claimed_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class RoastReservationParticipant(Base):
+    __tablename__ = "roast_reservation_participants"
+    __table_args__ = (
+        UniqueConstraint("reservation_id", "user_id", name="uq_roast_reservation_participant_user"),
+        Index("ix_roast_reservation_participants_reservation", "reservation_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    reservation_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    pig_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    joined_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())

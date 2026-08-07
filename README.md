@@ -20,13 +20,14 @@
   <a href="https://github.com/Felis2026/rollpig-resources">Resources</a>
 </p>
 
-> **什么时候需要部署？** 单 Bot 使用本地存储时不需要 RollPig Cloud。只有多个 Bot 需要共享抽猪记录、图鉴成长、烤群友充能或群日报状态时，才需要启用云端存储。
+> **什么时候需要部署？** 单 Bot 使用本地存储时不需要 RollPig Cloud。只有多个 Bot 需要共享抽猪记录、图鉴成长、烤群友充能、预约烤猪或群日报状态时，才需要启用云端存储。
 
 ## ✨ 功能概述
 
 - **多 Bot 状态同步**：保存 `daily_rolls`、`draw_state`、`collections` 等用户成长数据。
 - **群维度数据**：保存 `group_rolls`、群保护状态、活跃群列表与日报所需聚合数据。
 - **烤群友充能**：为普通烤群友提供服务端次数存储与冷却恢复。
+- **预约烤猪**：处理预约创建、多人加入、首次抽猪激活、跨 Bot 领取与固定结果重试。
 - **图鉴快照接口**：为 RollPig Plus 图片版图鉴聚合收藏、近 14 天抽猪与近 7 天被烤数据。
 - **静态资源托管**：通过 `/resources/...` 暴露来自 `rollpig-resources` 的远端资源包。
 - **共享文案托管**：通过 `/resources/rollpig-roasts/...` 提供审核后的只读烤猪文案，不进入数据库。
@@ -193,6 +194,18 @@ docker run -d \
 | `POST` | `/v1/protections/replace-group` | 替换群保护名单 |
 | `GET` | `/v1/protections/check` | 检查用户是否在群保护名单中 |
 
+### 预约烤猪
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `POST` | `/v1/roast-reservations/unrolled-attempt` | 记录用户当天未抽猪先烤的违规次数 |
+| `POST` | `/v1/roast-reservations/prepare` | 原子检查目标、群保护、预约状态并消费创建资源或免费加入 |
+| `GET` | `/v1/roast-reservations/owned` | 查询指定 Bot 当天是否持有未完成预约 |
+| `POST` | `/v1/roast-reservations/claim` | 原子领取当前 Bot 可投递的 ready 预约 |
+| `POST` | `/v1/roast-reservations/outcome` | 首次保存固定烧烤结果快照；重复请求不覆盖 |
+| `POST` | `/v1/roast-reservations/complete` | 幂等完成已发送预约 |
+| `POST` | `/v1/roast-reservations/release` | 发送失败后释放预约，保留固定结果等待重试 |
+
 ## 🔄 数据迁移
 
 从旧本地 JSON 导入云端：
@@ -208,7 +221,9 @@ poetry run python tools/backfill_p1a_progress.py
 poetry run python tools/migrate_roast_charges.py
 ```
 
-服务启动时也会执行轻量运行期迁移，自动为旧 `user_usage` 表补齐 `roast_charges` 与 `roast_charge_updated_ts` 列。脚本保留是为了上线前可手动确认与重复执行。
+服务启动时也会执行轻量运行期迁移：自动为旧 `user_usage` 表补齐充能列，并通过 SQLAlchemy `create_all` 新建 `unrolled_roast_attempts`、`roast_reservations` 与 `roast_reservation_participants`。升级不会修改或删除既有业务表数据。
+
+预约结果由负责群聊的 Bot 在已有用户请求上机会式领取，单 Bot 最多每 90 秒检查一次；没有用户请求时不会产生后台轮询。领取后会先保存固定结果再发送，失败释放后重试仍使用同一结果。
 
 ## 📦 静态资源包
 

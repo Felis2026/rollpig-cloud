@@ -12,6 +12,7 @@ from ..db import get_session
 from ..models import DailyRoll, GroupRoll
 from ..schemas import DailyRollGetOrCreateRequest, DailyRollItem, DailyRollListResponse, DailyRollLookupResponse
 from ..services.progress import apply_created_roll_progress, build_lookup_response
+from ..services.reservations import activate_target_reservations
 
 router = APIRouter(prefix="/v1/daily-rolls", tags=["daily-rolls"], dependencies=[Depends(verify_token)])
 
@@ -33,6 +34,24 @@ def _ensure_group_roll(session: Session, group_id: str, user_id: str, pig_id: st
         session.add(GroupRoll(group_id=group_id, user_id=user_id, pig_id=pig_id, date_str=date_str))
 
 
+def _reconcile_reservations_after_commit(
+    session: Session,
+    *,
+    date_str: dt.date,
+    user_id: str,
+    pig_id: str,
+) -> None:
+    """提交 DailyRoll 后再次幂等对账，封住预约与抽猪并发提交的交错窗口。"""
+
+    if activate_target_reservations(
+        session,
+        date_str=date_str,
+        target_id=user_id,
+        target_pig_id=pig_id,
+    ):
+        session.commit()
+
+
 @router.post("/get-or-create", response_model=DailyRollLookupResponse)
 def get_or_create_daily_roll(req: DailyRollGetOrCreateRequest, session: Session = Depends(get_session)):
     existing = session.execute(
@@ -41,6 +60,12 @@ def get_or_create_daily_roll(req: DailyRollGetOrCreateRequest, session: Session 
     if existing:
         _ensure_group_roll(session, req.group_id, req.user_id, existing.pig_id, req.date_str)
         session.commit()
+        _reconcile_reservations_after_commit(
+            session,
+            date_str=req.date_str,
+            user_id=req.user_id,
+            pig_id=existing.pig_id,
+        )
         return build_lookup_response(session, user_id=req.user_id, pig_id=existing.pig_id, created=False)
 
     try:
@@ -50,7 +75,19 @@ def get_or_create_daily_roll(req: DailyRollGetOrCreateRequest, session: Session 
             session, req.user_id, req.proposed_pig_id
         )
         _ensure_group_roll(session, req.group_id, req.user_id, req.proposed_pig_id, req.date_str)
+        activate_target_reservations(
+            session,
+            date_str=req.date_str,
+            target_id=req.user_id,
+            target_pig_id=req.proposed_pig_id,
+        )
         session.commit()
+        _reconcile_reservations_after_commit(
+            session,
+            date_str=req.date_str,
+            user_id=req.user_id,
+            pig_id=req.proposed_pig_id,
+        )
         return build_lookup_response(
             session,
             user_id=req.user_id,
@@ -67,6 +104,12 @@ def get_or_create_daily_roll(req: DailyRollGetOrCreateRequest, session: Session 
         ).scalar_one()
         _ensure_group_roll(session, req.group_id, req.user_id, existing.pig_id, req.date_str)
         session.commit()
+        _reconcile_reservations_after_commit(
+            session,
+            date_str=req.date_str,
+            user_id=req.user_id,
+            pig_id=existing.pig_id,
+        )
         return build_lookup_response(session, user_id=req.user_id, pig_id=existing.pig_id, created=False)
 
 
