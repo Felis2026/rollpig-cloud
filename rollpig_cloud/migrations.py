@@ -54,6 +54,18 @@ def _migrate_existing_user_usage(engine: Engine) -> None:
             )
 
 
+def _migrate_ambiguous_roast_reservations(engine: Engine) -> None:
+    """把旧版可能已发送的 processing 记录转为不可自动重领的 sending。"""
+
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE roast_reservations SET status = 'sending' "
+                "WHERE status = 'processing' AND outcome_snapshot IS NOT NULL"
+            )
+        )
+
+
 def ensure_runtime_migrations(engine: Engine) -> None:
     """执行轻量运行期迁移，专门兜底 SQLAlchemy create_all 不会补旧表列的问题。"""
     inspector = inspect(engine)
@@ -74,3 +86,6 @@ def ensure_runtime_migrations(engine: Engine) -> None:
                 conn.execute(text(_add_column_sql("roast_events", "reservation_id", "VARCHAR(64) NOT NULL DEFAULT ''")))
             if "participant_snapshot" not in event_columns:
                 conn.execute(text(_add_column_sql("roast_events", "participant_snapshot", "JSON NULL")))
+
+    if "roast_reservations" in table_names:
+        _migrate_ambiguous_roast_reservations(engine)

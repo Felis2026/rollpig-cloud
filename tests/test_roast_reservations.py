@@ -224,6 +224,7 @@ class CloudRoastReservationTests(unittest.TestCase):
             self.session,
         )
         self.assertTrue(saved.ok)
+        self.assertEqual(saved.reservation.status, "sending")
         second_save = save_outcome(
             RoastReservationOutcomeRequest(
                 reservation_id=reservation.reservation_id,
@@ -248,6 +249,7 @@ class CloudRoastReservationTests(unittest.TestCase):
         ).items[0]
         self.assertEqual(reclaimed.outcome_snapshot, snapshot)
         self.assertNotEqual(reclaimed.claim_token, reservation.claim_token)
+        self.assertEqual(reclaimed.status, "sending")
 
         completed = complete(
             RoastReservationMutationRequest(
@@ -271,6 +273,70 @@ class CloudRoastReservationTests(unittest.TestCase):
                 self.session,
             ).items
         )
+
+    def test_sending_reservation_is_not_reclaimed_after_claim_timeout(self):
+        created = prepare_reservation(self.session, self._request())
+        self.session.commit()
+        activate_target_reservations(
+            self.session,
+            date_str=dt.date(2026, 8, 7),
+            target_id="target",
+            target_pig_id="pig-target",
+        )
+        self.session.commit()
+        reservation = claim(
+            RoastReservationClaimRequest(delivery_bot_id="bot-1", date_str=dt.date(2026, 8, 7)),
+            self.session,
+        ).items[0]
+        saved = save_outcome(
+            RoastReservationOutcomeRequest(
+                reservation_id=reservation.reservation_id,
+                claim_token=reservation.claim_token,
+                outcome_snapshot={"event_type": "escape"},
+            ),
+            self.session,
+        )
+        row = self.session.scalar(
+            select(RoastReservation).where(RoastReservation.reservation_id == created.reservation.reservation_id)
+        )
+        row.claimed_at = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) - dt.timedelta(hours=1)
+        self.session.commit()
+
+        reclaimed = claim(
+            RoastReservationClaimRequest(delivery_bot_id="bot-1", date_str=dt.date(2026, 8, 7)),
+            self.session,
+        )
+
+        self.assertEqual(saved.reservation.status, "sending")
+        self.assertFalse(reclaimed.items)
+
+    def test_stale_pre_send_processing_is_still_recoverable(self):
+        created = prepare_reservation(self.session, self._request())
+        self.session.commit()
+        activate_target_reservations(
+            self.session,
+            date_str=dt.date(2026, 8, 7),
+            target_id="target",
+            target_pig_id="pig-target",
+        )
+        self.session.commit()
+        first = claim(
+            RoastReservationClaimRequest(delivery_bot_id="bot-1", date_str=dt.date(2026, 8, 7)),
+            self.session,
+        ).items[0]
+        row = self.session.scalar(
+            select(RoastReservation).where(RoastReservation.reservation_id == created.reservation.reservation_id)
+        )
+        row.claimed_at = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) - dt.timedelta(hours=1)
+        self.session.commit()
+
+        reclaimed = claim(
+            RoastReservationClaimRequest(delivery_bot_id="bot-1", date_str=dt.date(2026, 8, 7)),
+            self.session,
+        ).items[0]
+
+        self.assertEqual(reclaimed.status, "processing")
+        self.assertNotEqual(reclaimed.claim_token, first.claim_token)
 
     def test_runtime_migration_adds_optional_event_columns(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -298,6 +364,39 @@ class CloudRoastReservationTests(unittest.TestCase):
                 columns = {column["name"] for column in inspect(engine).get_columns("roast_events")}
                 self.assertIn("reservation_id", columns)
                 self.assertIn("participant_snapshot", columns)
+            finally:
+                engine.dispose()
+
+    def test_runtime_migration_quarantines_ambiguous_processing_outcomes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "legacy.sqlite3"
+            engine = create_engine(f"sqlite+pysqlite:///{database_path.as_posix()}", future=True)
+            try:
+                with engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "CREATE TABLE roast_reservations ("
+                            "id INTEGER PRIMARY KEY, "
+                            "status VARCHAR(16) NOT NULL, "
+                            "outcome_snapshot JSON NULL"
+                            ")"
+                        )
+                    )
+                    connection.execute(
+                        text(
+                            "INSERT INTO roast_reservations (id, status, outcome_snapshot) VALUES "
+                            "(1, 'processing', '{\"event_type\": \"escape\"}'), "
+                            "(2, 'processing', NULL)"
+                        )
+                    )
+
+                ensure_runtime_migrations(engine)
+
+                with engine.connect() as connection:
+                    statuses = connection.execute(
+                        text("SELECT id, status FROM roast_reservations ORDER BY id")
+                    ).all()
+                self.assertEqual(statuses, [(1, "sending"), (2, "processing")])
             finally:
                 engine.dispose()
 

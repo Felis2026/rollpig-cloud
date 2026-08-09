@@ -102,7 +102,13 @@ def claim(req: RoastReservationClaimRequest, session: Session = Depends(get_sess
                 (RoastReservation.status == "ready")
                 | (
                     (RoastReservation.status == "processing")
-                    & (RoastReservation.claimed_at < stale_before)
+                    # processing 只代表发送前租约。已有结果快照的旧记录可能已经发出，
+                    # 即使状态尚未迁移也不能再自动领取。
+                    & RoastReservation.outcome_snapshot.is_(None)
+                    & (
+                        RoastReservation.claimed_at.is_(None)
+                        | (RoastReservation.claimed_at < stale_before)
+                    )
                 )
             ),
         )
@@ -111,7 +117,9 @@ def claim(req: RoastReservationClaimRequest, session: Session = Depends(get_sess
         .with_for_update()
     ).scalars().all()
     for row in rows:
-        row.status = "processing"
+        # 明确发送失败会把固定快照保留并退回 ready；重领时直接进入 sending，
+        # 这样客户端在真正发送前崩溃也不会让一条可能已发送的消息被租约回收。
+        row.status = "sending" if row.outcome_snapshot is not None else "processing"
         row.claim_token = uuid.uuid4().hex
         row.claimed_at = now
     session.flush()
@@ -125,10 +133,13 @@ def save_outcome(req: RoastReservationOutcomeRequest, session: Session = Depends
     row = session.execute(
         select(RoastReservation).where(RoastReservation.reservation_id == req.reservation_id).with_for_update()
     ).scalar_one_or_none()
-    if row is None or row.claim_token != req.claim_token or row.status not in {"processing", "completed"}:
+    if row is None or row.claim_token != req.claim_token or row.status not in {"processing", "sending", "completed"}:
         return RoastReservationMutationResponse(ok=False)
     if row.outcome_snapshot is None:
         row.outcome_snapshot = req.outcome_snapshot
+    if row.status == "processing":
+        # 固化结果与进入发送态必须同事务提交，避免发送成功后仍被 processing 租约回收。
+        row.status = "sending"
     session.commit()
     return RoastReservationMutationResponse(ok=True, reservation=reservation_to_schema(session, row))
 
@@ -141,7 +152,7 @@ def complete(req: RoastReservationMutationRequest, session: Session = Depends(ge
     if (
         row is None
         or row.claim_token != req.claim_token
-        or row.status not in {"processing", "completed"}
+        or row.status not in {"sending", "completed"}
     ):
         return RoastReservationMutationResponse(ok=False)
     if row.status != "completed":
@@ -156,7 +167,7 @@ def release(req: RoastReservationMutationRequest, session: Session = Depends(get
     row = session.execute(
         select(RoastReservation).where(RoastReservation.reservation_id == req.reservation_id).with_for_update()
     ).scalar_one_or_none()
-    if row is None or row.claim_token != req.claim_token or row.status != "processing":
+    if row is None or row.claim_token != req.claim_token or row.status not in {"processing", "sending"}:
         return RoastReservationMutationResponse(ok=False)
     row.status = "ready"
     row.claim_token = None
