@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import time
 
 from sqlalchemy import inspect, text
@@ -8,6 +9,7 @@ from sqlalchemy.engine import Engine
 
 DEFAULT_ROAST_CHARGE_MAX = 2
 DEFAULT_ROAST_CHARGE_RECOVER_SECONDS = 8 * 3600
+ROLLPIG_TIMEZONE = dt.timezone(dt.timedelta(hours=8), "Asia/Shanghai")
 
 
 def _quote_identifier(name: str) -> str:
@@ -66,8 +68,14 @@ def _migrate_ambiguous_roast_reservations(engine: Engine) -> None:
         )
 
 
-def ensure_runtime_migrations(engine: Engine) -> None:
-    """执行轻量运行期迁移，专门兜底 SQLAlchemy create_all 不会补旧表列的问题。"""
+def ensure_runtime_migrations(
+    engine: Engine,
+    *,
+    backfill_group_activity: bool = True,
+    activity_start: dt.date | None = None,
+    activity_end: dt.date | None = None,
+) -> None:
+    """执行轻量运行期迁移，并按需回填最近群日活数据。"""
     inspector = inspect(engine)
     table_names = set(inspector.get_table_names())
     if "user_usage" in table_names:
@@ -89,3 +97,62 @@ def ensure_runtime_migrations(engine: Engine) -> None:
 
     if "roast_reservations" in table_names:
         _migrate_ambiguous_roast_reservations(engine)
+
+    # 新增群日活表时只回填上海业务日期的今天与昨天：既覆盖跨日部署，
+    # 又避免 Cloud 每次启动扫描全部历史记录。调用方负责仅在首次建表时开启回填。
+    table_names = set(inspect(engine).get_table_names())
+    if backfill_group_activity and "group_daily_active_users" in table_names:
+        business_today = dt.datetime.now(ROLLPIG_TIMEZONE).date()
+        start_date = activity_start or business_today - dt.timedelta(days=1)
+        end_date = activity_end or business_today
+        date_params = {"activity_start": start_date, "activity_end": end_date}
+        # 多实例首次启动可能同时判断为需要回填；数据库原生冲突忽略负责兜底唯一键竞争。
+        insert_clause = {
+            "mysql": "INSERT IGNORE INTO",
+            "sqlite": "INSERT OR IGNORE INTO",
+        }.get(engine.dialect.name, "INSERT INTO")
+        with engine.begin() as conn:
+            if "group_rolls" in table_names:
+                conn.execute(text(
+                    f"{insert_clause} group_daily_active_users (date_str, group_id, user_id, active_at) "
+                    "SELECT DISTINCT source.date_str, source.group_id, source.user_id, CURRENT_TIMESTAMP "
+                    "FROM group_rolls AS source "
+                    "WHERE source.date_str BETWEEN :activity_start AND :activity_end "
+                    "AND NOT EXISTS ("
+                    "SELECT 1 FROM group_daily_active_users AS active "
+                    "WHERE active.date_str = source.date_str "
+                    "AND active.group_id = source.group_id "
+                    "AND active.user_id = source.user_id)"
+                ), date_params)
+            if "roast_events" in table_names:
+                conn.execute(text(
+                    f"{insert_clause} group_daily_active_users (date_str, group_id, user_id, active_at) "
+                    "SELECT DISTINCT source.date_str, source.group_id, source.user_id, CURRENT_TIMESTAMP "
+                    "FROM ("
+                    "SELECT date_str, group_id, attacker_id AS user_id FROM roast_events "
+                    "WHERE group_id <> '' AND attacker_id <> '' "
+                    "UNION "
+                    "SELECT date_str, group_id, target_id AS user_id FROM roast_events "
+                    "WHERE group_id <> '' AND target_id <> '' AND event_type <> 'bot_backfire'"
+                    ") AS source "
+                    "WHERE source.date_str BETWEEN :activity_start AND :activity_end "
+                    "AND NOT EXISTS ("
+                    "SELECT 1 FROM group_daily_active_users AS active "
+                    "WHERE active.date_str = source.date_str "
+                    "AND active.group_id = source.group_id "
+                    "AND active.user_id = source.user_id)"
+                ), date_params)
+            if {"roast_reservations", "roast_reservation_participants"}.issubset(table_names):
+                conn.execute(text(
+                    f"{insert_clause} group_daily_active_users (date_str, group_id, user_id, active_at) "
+                    "SELECT DISTINCT reservation.date_str, reservation.group_id, participant.user_id, CURRENT_TIMESTAMP "
+                    "FROM roast_reservations AS reservation "
+                    "JOIN roast_reservation_participants AS participant "
+                    "ON participant.reservation_id = reservation.reservation_id "
+                    "WHERE reservation.date_str BETWEEN :activity_start AND :activity_end "
+                    "AND NOT EXISTS ("
+                    "SELECT 1 FROM group_daily_active_users AS active "
+                    "WHERE active.date_str = reservation.date_str "
+                    "AND active.group_id = reservation.group_id "
+                    "AND active.user_id = participant.user_id)"
+                ), date_params)

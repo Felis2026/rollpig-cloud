@@ -243,3 +243,82 @@ class RoastReservationMutationRequest(BaseModel):
 class RoastReservationMutationResponse(BaseModel):
     ok: bool
     reservation: RoastReservationItem | None = None
+
+
+# ================================ 烤箱补货 API ================================ #
+
+class GroupActiveUsersMarkRequest(BaseModel):
+    group_id: str
+    user_ids: list[str] = Field(default_factory=list)
+    date_str: dt.date
+
+
+class GroupActiveUsersResponse(BaseModel):
+    user_ids: list[str] = Field(default_factory=list)
+
+
+class GroupRoastRefillItem(BaseModel):
+    request_id: str
+    date_str: dt.date
+    group_id: str
+    initiator_id: str
+    initiator_name: str = ""
+    delivery_bot_id: str
+    message_id: str = ""
+    active_count_snapshot: int
+    required_ratio: int
+    required_votes: int
+    success_count_before: int
+    status: str
+    created_at: dt.datetime
+    expires_at: dt.datetime
+    completed_at: dt.datetime | None = None
+    benefited_user_ids: list[str] = Field(default_factory=list)
+    failure_reason: str = ""
+
+
+class GroupRoastRefillPrepareRequest(BaseModel):
+    group_id: str
+    initiator_id: str
+    initiator_name: str = ""
+    delivery_bot_id: str
+    date_str: dt.date
+    now_ts: float | None = None
+
+
+class GroupRoastRefillPrepareResponse(BaseModel):
+    status: str
+    request: GroupRoastRefillItem | None = None
+    active_user_ids: list[str] = Field(default_factory=list)
+
+
+class GroupRoastRefillBindRequest(BaseModel):
+    request_id: str
+    message_id: str
+
+
+class GroupRoastRefillLookupResponse(BaseModel):
+    request: GroupRoastRefillItem | None = None
+
+
+class GroupRoastRefillFailRequest(BaseModel):
+    request_id: str
+    message_id: str = ""
+    reason: str = "failed"
+
+
+class GroupRoastRefillCompleteRequest(BaseModel):
+    request_id: str
+    message_id: str
+    voter_ids: list[str] = Field(default_factory=list)
+    excluded_user_ids: list[str] = Field(default_factory=list)
+    max_charges: int = 2
+    now_ts: float | None = None
+
+
+class GroupRoastRefillCompleteResponse(BaseModel):
+    completed: bool
+    status: str
+    request: GroupRoastRefillItem | None = None
+    valid_voter_ids: list[str] = Field(default_factory=list)
+    benefited_user_ids: list[str] = Field(default_factory=list)

@@ -10,6 +10,7 @@ from ..auth import verify_token
 from ..db import get_session
 from ..models import GroupRoll
 from ..schemas import GroupRollItem, GroupRollListResponse, GroupRollMarkSeenRequest
+from ..services.roast_refills import mark_group_active_users
 
 router = APIRouter(prefix="/v1/group-rolls", tags=["group-rolls"], dependencies=[Depends(verify_token)])
 
@@ -27,6 +28,12 @@ def mark_seen(req: GroupRollMarkSeenRequest, session: Session = Depends(get_sess
         existing.pig_id = req.pig_id
     else:
         session.add(GroupRoll(group_id=req.group_id, user_id=req.user_id, pig_id=req.pig_id, date_str=req.date_str))
+    mark_group_active_users(
+        session,
+        date_str=req.date_str,
+        group_id=req.group_id,
+        user_ids=[req.user_id],
+    )
     session.commit()
     return {"ok": True}
 

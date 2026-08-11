@@ -182,3 +182,48 @@ class RoastReservationParticipant(Base):
     display_name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
     pig_id: Mapped[str] = mapped_column(String(128), nullable=False)
     joined_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+
+
+# ================================ 烤箱补货状态 ================================ #
+# active_key 只在 voting 状态保留；唯一约束让多实例同时发起时最多创建一场活动申请。
+class GroupDailyActiveUser(Base):
+    __tablename__ = "group_daily_active_users"
+    __table_args__ = (
+        UniqueConstraint("date_str", "group_id", "user_id", name="uq_group_daily_active_date_group_user"),
+        Index("ix_group_daily_active_date_group", "date_str", "group_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    date_str: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    group_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    active_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+
+
+class GroupRoastRefillRequest(Base):
+    __tablename__ = "group_roast_refill_requests"
+    __table_args__ = (
+        UniqueConstraint("request_id", name="uq_group_roast_refill_request_id"),
+        UniqueConstraint("active_key", name="uq_group_roast_refill_active_key"),
+        Index("ix_group_roast_refill_date_group", "date_str", "group_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    request_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    active_key: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    date_str: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    group_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    initiator_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    initiator_name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    delivery_bot_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    message_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    active_count_snapshot: Mapped[int] = mapped_column(Integer, nullable=False)
+    required_ratio: Mapped[int] = mapped_column(Integer, nullable=False)
+    required_votes: Mapped[int] = mapped_column(Integer, nullable=False)
+    success_count_before: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="voting")
+    benefited_user_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    failure_reason: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    expires_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
+    completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)

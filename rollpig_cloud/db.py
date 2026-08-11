@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from .config import settings
@@ -26,5 +26,9 @@ def init_db():
     from . import models  # noqa: F401
     from .migrations import ensure_runtime_migrations
 
+    existing_tables = set(inspect(engine).get_table_names())
     Base.metadata.create_all(bind=engine)
-    ensure_runtime_migrations(engine)
+    ensure_runtime_migrations(
+        engine,
+        backfill_group_activity="group_daily_active_users" not in existing_tables,
+    )

@@ -10,6 +10,7 @@ from ..auth import verify_token
 from ..db import get_session
 from ..models import RoastEvent
 from ..schemas import EventCreateRequest, EventItem, EventListResponse
+from ..services.roast_refills import mark_group_active_users
 
 router = APIRouter(prefix="/v1/events", tags=["events"], dependencies=[Depends(verify_token)])
 
@@ -37,6 +38,16 @@ def create_event(req: EventCreateRequest, session: Session = Depends(get_session
             } if req.reservation_id else None,
         )
     )
+    if req.group_id:
+        active_user_ids = [req.attacker_id, *req.participant_ids]
+        if req.event_type != "bot_backfire":
+            active_user_ids.append(req.target_id)
+        mark_group_active_users(
+            session,
+            date_str=target_date,
+            group_id=req.group_id,
+            user_ids=active_user_ids,
+        )
     session.commit()
     return {"ok": True}
 

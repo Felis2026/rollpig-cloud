@@ -20,7 +20,7 @@
   <a href="https://github.com/Felis2026/rollpig-resources">Resources</a>
 </p>
 
-> **什么时候需要部署？** 单 Bot 使用本地存储时不需要 RollPig Cloud。只有多个 Bot 需要共享抽猪记录、图鉴成长、烤群友充能、预约烤猪或群日报状态时，才需要启用云端存储。
+> **什么时候需要部署？** 单 Bot 使用本地存储时不需要 RollPig Cloud。只有多个 Bot 需要共享抽猪记录、图鉴成长、烤群友充能、预约烤猪、烤箱补货或群日报状态时，才需要启用云端存储。
 
 ## ✨ 功能概述
 
@@ -28,6 +28,7 @@
 - **群维度数据**：保存 `group_rolls`、群保护状态、活跃群列表与日报所需聚合数据。
 - **烤群友充能**：为普通烤群友提供服务端次数存储与冷却恢复。
 - **预约烤猪**：处理预约创建、多人加入、首次抽猪激活、跨 Bot 领取与固定结果重试。
+- **烤箱补货**：保存群日活与投票申请，并在单个事务中验票、批量恢复普通烧烤配额。
 - **图鉴快照接口**：为 RollPig Plus 图片版图鉴聚合收藏、近 14 天抽猪与近 7 天被烤数据。
 - **静态资源托管**：通过 `/resources/...` 暴露来自 `rollpig-resources` 的远端资源包。
 - **共享文案托管**：通过 `/resources/rollpig-roasts/...` 提供审核后的只读烤猪文案，不进入数据库。
@@ -208,6 +209,18 @@ docker run -d \
 | `POST` | `/v1/roast-reservations/complete` | 幂等完成已发送预约 |
 | `POST` | `/v1/roast-reservations/release` | 外部发送前释放 `processing/prepared`，保留固定结果等待重试 |
 
+### 烤箱补货
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `POST` | `/v1/group-roast-refills/active-users/mark` | 幂等登记本群当日 RollPig 活跃玩家 |
+| `GET` | `/v1/group-roast-refills/active-users` | 查询本群当日活跃玩家集合 |
+| `POST` | `/v1/group-roast-refills/prepare` | 冻结活跃人数门槛并原子创建或返回当前申请 |
+| `POST` | `/v1/group-roast-refills/bind-message` | 绑定 QQ 投票消息 ID |
+| `GET` | `/v1/group-roast-refills/active` | 查询并懒过期当前群申请 |
+| `POST` | `/v1/group-roast-refills/fail` | 将不可继续验票的申请标记失败 |
+| `POST` | `/v1/group-roast-refills/complete` | 按最新日活原子验票、按插件配置上限批量恢复配额并完成申请 |
+
 ## 🔄 数据迁移
 
 从旧本地 JSON 导入云端：
@@ -223,7 +236,7 @@ poetry run python tools/backfill_p1a_progress.py
 poetry run python tools/migrate_roast_charges.py
 ```
 
-服务启动时也会执行轻量运行期迁移：自动为旧 `user_usage` 表补齐充能列，并通过 SQLAlchemy `create_all` 新建 `unrolled_roast_attempts`、`roast_reservations` 与 `roast_reservation_participants`。本次预约可靠性更新没有 schema migration，但会执行一次幂等、非破坏性的数据状态修复：旧版 `processing + outcome_snapshot` 记录统一冻结为 `sending`，避免升级后把一条可能已经发出的群消息自动重发。
+服务启动时也会执行轻量运行期迁移：自动为旧 `user_usage` 表补齐充能列，并通过 SQLAlchemy `create_all` 新建预约、群日活与烤箱补货相关表；群日活表首次创建时只回填上海业务日期的今天与昨天，避免后续启动重复扫描全部历史记录。本次预约可靠性更新没有 schema migration，但会执行一次幂等、非破坏性的数据状态修复：旧版 `processing + outcome_snapshot` 记录统一冻结为 `sending`，避免升级后把一条可能已经发出的群消息自动重发。
 
 预约结果由负责群聊的 Owner Bot 领取。只要本机仍持有未完成预约，就会在已有用户请求之外每 60 秒最多发起一次合并领取请求；该请求同时返回可投递项目和是否仍需继续轮询，没有预约时自动停止。领取后的状态依次为 `processing → prepared → sending → completed`：`processing/prepared` 可在租约过期后重领，`sending` 表示“已经提交外部发送意图、结果可能不确定”，永不自动重领。`prepare`、`sending` 与 `complete` 均允许同一领取凭证幂等重试。
 
