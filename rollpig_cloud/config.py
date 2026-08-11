@@ -1,6 +1,16 @@
 from __future__ import annotations
 
+import datetime as dt
 import os
+
+
+ROLLPIG_TIMEZONE = dt.timezone(dt.timedelta(hours=8), "Asia/Shanghai")
+
+
+def rollpig_today() -> dt.date:
+    """返回 RollPig 业务时区中的日期，避免依赖容器主机时区。"""
+
+    return dt.datetime.now(ROLLPIG_TIMEZONE).date()
 
 
 class Settings:

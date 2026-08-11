@@ -4,7 +4,6 @@ import datetime as dt
 import time
 
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..migrations import DEFAULT_ROAST_CHARGE_MAX, DEFAULT_ROAST_CHARGE_RECOVER_SECONDS

@@ -16,8 +16,9 @@ from .routers.group_rolls import router as group_rolls_router
 from .routers.groups import router as groups_router
 from .routers.protections import router as protections_router
 from .routers.roast_reservations import router as roast_reservations_router
+from .routers.roast_refills import router as roast_refills_router
 
-app = FastAPI(title="rollpig-cloud", version="0.3.0")
+app = FastAPI(title="rollpig-cloud", version="0.4.0")
 STATIC_DIR = Path(__file__).resolve().parents[1] / "static"
 RESOURCES_DIR = STATIC_DIR / "resources"
 
@@ -42,6 +43,7 @@ app.include_router(protections_router)
 app.include_router(groups_router)
 app.include_router(catalog_router)
 app.include_router(roast_reservations_router)
+app.include_router(roast_refills_router)
 
 if RESOURCES_DIR.exists():
     # /resources 用于托管 RollPig 小猪静态资源包。这里不挂载 Python 代码，只暴露 json/png。

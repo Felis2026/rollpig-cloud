@@ -13,6 +13,7 @@ from ..models import DailyRoll, GroupRoll
 from ..schemas import DailyRollGetOrCreateRequest, DailyRollItem, DailyRollListResponse, DailyRollLookupResponse
 from ..services.progress import apply_created_roll_progress, build_lookup_response
 from ..services.reservations import activate_target_reservations
+from ..services.roast_refills import mark_group_active_users
 
 router = APIRouter(prefix="/v1/daily-rolls", tags=["daily-rolls"], dependencies=[Depends(verify_token)])
 
@@ -32,6 +33,12 @@ def _ensure_group_roll(session: Session, group_id: str, user_id: str, pig_id: st
             existing.pig_id = pig_id
     else:
         session.add(GroupRoll(group_id=group_id, user_id=user_id, pig_id=pig_id, date_str=date_str))
+    mark_group_active_users(
+        session,
+        date_str=date_str,
+        group_id=group_id,
+        user_ids=[user_id],
+    )
 
 
 def _reconcile_reservations_after_commit(

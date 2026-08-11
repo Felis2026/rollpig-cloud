@@ -6,7 +6,7 @@ import uuid
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..models import DailyRoll, GroupProtection, RoastReservation, RoastReservationParticipant, UnrolledRoastAttempt
+from ..models import DailyRoll, GroupProtection, RoastReservation, RoastReservationParticipant
 from ..schemas import (
     ConsumeRoastResponse,
     RoastReservationItem,
@@ -15,6 +15,7 @@ from ..schemas import (
     RoastReservationPrepareResponse,
 )
 from .usage import consume_force_usage, consume_roast_usage
+from .roast_refills import mark_group_active_users
 
 
 ROAST_RESERVATION_MAX_PARTICIPANTS = 12
@@ -100,6 +101,12 @@ def prepare_reservation(session: Session, req: RoastReservationPrepareRequest) -
                 pig_id=req.attacker_pig_id,
             )
         )
+        mark_group_active_users(
+            session,
+            date_str=req.date_str,
+            group_id=req.group_id,
+            user_ids=[req.attacker_id],
+        )
         session.flush()
         return RoastReservationPrepareResponse(
             status="reservation_joined",
@@ -160,6 +167,12 @@ def prepare_reservation(session: Session, req: RoastReservationPrepareRequest) -
             display_name=req.attacker_name,
             pig_id=req.attacker_pig_id,
         )
+    )
+    mark_group_active_users(
+        session,
+        date_str=req.date_str,
+        group_id=req.group_id,
+        user_ids=[req.attacker_id],
     )
     session.flush()
     return RoastReservationPrepareResponse(

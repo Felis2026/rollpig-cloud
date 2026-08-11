@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.orm import Session
@@ -14,15 +15,31 @@ os.environ.setdefault("ROLLPIG_CLOUD_DATABASE_URL", "sqlite+pysqlite:///:memory:
 from rollpig_cloud.db import Base
 from rollpig_cloud.main import app
 from rollpig_cloud.migrations import ensure_runtime_migrations
-from rollpig_cloud.models import DailyRoll, GroupProtection, RoastReservation, RoastReservationParticipant, UserUsage
-from rollpig_cloud.schemas import ConsumeForceRequest, ConsumeRoastRequest, RoastReservationPrepareRequest
+from rollpig_cloud.models import (
+    DailyRoll,
+    GroupProtection,
+    RoastEvent,
+    RoastReservation,
+    RoastReservationParticipant,
+    UserUsage,
+)
+from rollpig_cloud.schemas import ConsumeForceRequest, ConsumeRoastRequest, EventCreateRequest, RoastReservationPrepareRequest
 from rollpig_cloud.schemas import (
     RoastReservationClaimRequest,
+    RoastReservationCompleteRequest,
     RoastReservationMutationRequest,
     RoastReservationOutcomeRequest,
 )
-from rollpig_cloud.routers.roast_reservations import claim, complete, release, save_outcome
+from rollpig_cloud.routers.roast_reservations import (
+    claim,
+    complete,
+    mark_sending,
+    prepare_outcome,
+    release,
+    save_outcome,
+)
 from rollpig_cloud.routers.cooldowns import consume_force, consume_roast
+from rollpig_cloud.routers.events import create_event, list_events
 from rollpig_cloud.services.reservations import activate_target_reservations, prepare_reservation
 
 
@@ -52,6 +69,17 @@ class CloudRoastReservationTests(unittest.TestCase):
         }
         payload.update(overrides)
         return RoastReservationPrepareRequest(**payload)
+
+    def _claim_request(self, **overrides) -> RoastReservationClaimRequest:
+        """测试默认模拟支持 prepared 的新 Plus；旧客户端用原始 schema 构造。"""
+
+        payload = {
+            "delivery_bot_id": "bot-1",
+            "date_str": dt.date(2026, 8, 7),
+            "supports_prepared": True,
+        }
+        payload.update(overrides)
+        return RoastReservationClaimRequest(**payload)
 
     def test_prepare_create_join_and_duplicate_is_atomic(self):
         created = prepare_reservation(self.session, self._request())
@@ -190,7 +218,7 @@ class CloudRoastReservationTests(unittest.TestCase):
         self.assertEqual(joined.status, "reservation_joined")
 
     def test_claim_outcome_release_and_complete_are_idempotent(self):
-        created = prepare_reservation(self.session, self._request())
+        prepare_reservation(self.session, self._request())
         self.session.commit()
         activate_target_reservations(
             self.session,
@@ -201,21 +229,22 @@ class CloudRoastReservationTests(unittest.TestCase):
         self.session.commit()
 
         claimed = claim(
-            RoastReservationClaimRequest(delivery_bot_id="bot-1", date_str=dt.date(2026, 8, 7)),
+            self._claim_request(),
             self.session,
         )
         self.assertEqual(len(claimed.items), 1)
+        self.assertTrue(claimed.has_owned)
         reservation = claimed.items[0]
         self.assertTrue(reservation.claim_token)
         self.assertFalse(
             claim(
-                RoastReservationClaimRequest(delivery_bot_id="bot-1", date_str=dt.date(2026, 8, 7)),
+                self._claim_request(),
                 self.session,
             ).items
         )
 
         snapshot = {"event_type": "escape", "plain_text": "fixed"}
-        saved = save_outcome(
+        saved = prepare_outcome(
             RoastReservationOutcomeRequest(
                 reservation_id=reservation.reservation_id,
                 claim_token=reservation.claim_token,
@@ -224,8 +253,18 @@ class CloudRoastReservationTests(unittest.TestCase):
             self.session,
         )
         self.assertTrue(saved.ok)
-        self.assertEqual(saved.reservation.status, "sending")
-        second_save = save_outcome(
+        self.assertEqual(saved.reservation.status, "prepared")
+        second_save = prepare_outcome(
+            RoastReservationOutcomeRequest(
+                reservation_id=reservation.reservation_id,
+                claim_token=reservation.claim_token,
+                outcome_snapshot=snapshot,
+            ),
+            self.session,
+        )
+        self.assertTrue(second_save.ok)
+        self.assertEqual(second_save.reservation.outcome_snapshot, snapshot)
+        divergent_save = prepare_outcome(
             RoastReservationOutcomeRequest(
                 reservation_id=reservation.reservation_id,
                 claim_token=reservation.claim_token,
@@ -233,7 +272,7 @@ class CloudRoastReservationTests(unittest.TestCase):
             ),
             self.session,
         )
-        self.assertEqual(second_save.reservation.outcome_snapshot, snapshot)
+        self.assertFalse(divergent_save.ok)
 
         released = release(
             RoastReservationMutationRequest(
@@ -244,15 +283,43 @@ class CloudRoastReservationTests(unittest.TestCase):
         )
         self.assertTrue(released.ok)
         reclaimed = claim(
-            RoastReservationClaimRequest(delivery_bot_id="bot-1", date_str=dt.date(2026, 8, 7)),
+            self._claim_request(),
             self.session,
         ).items[0]
         self.assertEqual(reclaimed.outcome_snapshot, snapshot)
         self.assertNotEqual(reclaimed.claim_token, reservation.claim_token)
-        self.assertEqual(reclaimed.status, "sending")
+        self.assertEqual(reclaimed.status, "prepared")
+
+        sending = mark_sending(
+            RoastReservationMutationRequest(
+                reservation_id=reclaimed.reservation_id,
+                claim_token=reclaimed.claim_token,
+            ),
+            self.session,
+        )
+        self.assertTrue(sending.ok)
+        self.assertEqual(sending.reservation.status, "sending")
+        repeated_sending = mark_sending(
+            RoastReservationMutationRequest(
+                reservation_id=reclaimed.reservation_id,
+                claim_token=reclaimed.claim_token,
+            ),
+            self.session,
+        )
+        self.assertTrue(repeated_sending.ok)
+
+        late_prepare_retry = prepare_outcome(
+            RoastReservationOutcomeRequest(
+                reservation_id=reclaimed.reservation_id,
+                claim_token=reclaimed.claim_token,
+                outcome_snapshot=snapshot,
+            ),
+            self.session,
+        )
+        self.assertTrue(late_prepare_retry.ok)
 
         completed = complete(
-            RoastReservationMutationRequest(
+            RoastReservationCompleteRequest(
                 reservation_id=reclaimed.reservation_id,
                 claim_token=reclaimed.claim_token,
             ),
@@ -260,19 +327,16 @@ class CloudRoastReservationTests(unittest.TestCase):
         )
         self.assertTrue(completed.ok)
         repeated = complete(
-            RoastReservationMutationRequest(
+            RoastReservationCompleteRequest(
                 reservation_id=reclaimed.reservation_id,
                 claim_token=reclaimed.claim_token,
             ),
             self.session,
         )
         self.assertTrue(repeated.ok)
-        self.assertFalse(
-            claim(
-                RoastReservationClaimRequest(delivery_bot_id="bot-1", date_str=dt.date(2026, 8, 7)),
-                self.session,
-            ).items
-        )
+        final_claim = claim(self._claim_request(), self.session)
+        self.assertFalse(final_claim.items)
+        self.assertFalse(final_claim.has_owned)
 
     def test_sending_reservation_is_not_reclaimed_after_claim_timeout(self):
         created = prepare_reservation(self.session, self._request())
@@ -285,14 +349,28 @@ class CloudRoastReservationTests(unittest.TestCase):
         )
         self.session.commit()
         reservation = claim(
-            RoastReservationClaimRequest(delivery_bot_id="bot-1", date_str=dt.date(2026, 8, 7)),
+            self._claim_request(),
             self.session,
         ).items[0]
-        saved = save_outcome(
+        saved = prepare_outcome(
             RoastReservationOutcomeRequest(
                 reservation_id=reservation.reservation_id,
                 claim_token=reservation.claim_token,
                 outcome_snapshot={"event_type": "escape"},
+            ),
+            self.session,
+        )
+        sending = mark_sending(
+            RoastReservationMutationRequest(
+                reservation_id=reservation.reservation_id,
+                claim_token=reservation.claim_token,
+            ),
+            self.session,
+        )
+        refused_release = release(
+            RoastReservationMutationRequest(
+                reservation_id=reservation.reservation_id,
+                claim_token=reservation.claim_token,
             ),
             self.session,
         )
@@ -303,12 +381,215 @@ class CloudRoastReservationTests(unittest.TestCase):
         self.session.commit()
 
         reclaimed = claim(
-            RoastReservationClaimRequest(delivery_bot_id="bot-1", date_str=dt.date(2026, 8, 7)),
+            self._claim_request(),
             self.session,
         )
 
-        self.assertEqual(saved.reservation.status, "sending")
+        self.assertEqual(saved.reservation.status, "prepared")
+        self.assertEqual(sending.reservation.status, "sending")
+        self.assertFalse(refused_release.ok)
         self.assertFalse(reclaimed.items)
+
+    def test_stale_prepared_snapshot_is_recoverable(self):
+        created = prepare_reservation(self.session, self._request())
+        self.session.commit()
+        activate_target_reservations(
+            self.session,
+            date_str=dt.date(2026, 8, 7),
+            target_id="target",
+            target_pig_id="pig-target",
+        )
+        self.session.commit()
+        first = claim(
+            self._claim_request(),
+            self.session,
+        ).items[0]
+        saved = prepare_outcome(
+            RoastReservationOutcomeRequest(
+                reservation_id=first.reservation_id,
+                claim_token=first.claim_token,
+                outcome_snapshot={"event_type": "escape", "plain_text": "fixed"},
+            ),
+            self.session,
+        )
+        row = self.session.scalar(
+            select(RoastReservation).where(
+                RoastReservation.reservation_id == created.reservation.reservation_id
+            )
+        )
+        row.claimed_at = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None) - dt.timedelta(hours=1)
+        self.session.commit()
+
+        reclaimed = claim(
+            self._claim_request(),
+            self.session,
+        ).items[0]
+
+        self.assertEqual(saved.reservation.status, "prepared")
+        self.assertEqual(reclaimed.status, "prepared")
+        self.assertEqual(reclaimed.outcome_snapshot["plain_text"], "fixed")
+        self.assertNotEqual(reclaimed.claim_token, first.claim_token)
+
+    def test_claim_reports_owner_and_skips_locally_deferred_reservation(self):
+        created = prepare_reservation(self.session, self._request())
+        self.session.commit()
+
+        pending = claim(self._claim_request(), self.session)
+        self.assertFalse(pending.items)
+        self.assertTrue(pending.has_owned)
+
+        activate_target_reservations(
+            self.session,
+            date_str=dt.date(2026, 8, 7),
+            target_id="target",
+            target_pig_id="pig-target",
+        )
+        self.session.commit()
+        deferred = claim(
+            self._claim_request(
+                excluded_reservation_ids=[created.reservation.reservation_id]
+            ),
+            self.session,
+        )
+
+        self.assertFalse(deferred.items)
+        self.assertTrue(deferred.has_owned)
+        row = self.session.scalar(
+            select(RoastReservation).where(
+                RoastReservation.reservation_id == created.reservation.reservation_id
+            )
+        )
+        self.assertEqual(row.status, "ready")
+
+    def test_legacy_client_can_take_over_stale_prepared_snapshot(self):
+        created = prepare_reservation(self.session, self._request())
+        self.session.commit()
+        activate_target_reservations(
+            self.session,
+            date_str=dt.date(2026, 8, 7),
+            target_id="target",
+            target_pig_id="pig-target",
+        )
+        self.session.commit()
+        current = claim(self._claim_request(), self.session).items[0]
+        snapshot = {"event_type": "escape", "plain_text": "fixed"}
+        prepare_outcome(
+            RoastReservationOutcomeRequest(
+                reservation_id=current.reservation_id,
+                claim_token=current.claim_token,
+                outcome_snapshot=snapshot,
+            ),
+            self.session,
+        )
+        row = self.session.scalar(
+            select(RoastReservation).where(
+                RoastReservation.reservation_id == created.reservation.reservation_id
+            )
+        )
+        row.claimed_at = (
+            dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+            - dt.timedelta(hours=1)
+        )
+        self.session.commit()
+
+        # 旧 Plus 没有 supports_prepared 字段；Cloud 必须返回它认识的 sending，
+        # 让它直接渲染固定快照，而不是在 prepared 与旧 /outcome 之间循环。
+        legacy = claim(
+            RoastReservationClaimRequest(
+                delivery_bot_id="bot-1",
+                date_str=dt.date(2026, 8, 7),
+            ),
+            self.session,
+        ).items[0]
+
+        self.assertEqual(legacy.status, "sending")
+        self.assertEqual(legacy.outcome_snapshot, snapshot)
+        self.assertNotEqual(legacy.claim_token, current.claim_token)
+
+    def test_legacy_outcome_endpoint_keeps_old_client_sending_semantics(self):
+        created = prepare_reservation(self.session, self._request())
+        self.session.commit()
+        activate_target_reservations(
+            self.session,
+            date_str=dt.date(2026, 8, 7),
+            target_id="target",
+            target_pig_id="pig-target",
+        )
+        self.session.commit()
+        reservation = claim(
+            RoastReservationClaimRequest(
+                delivery_bot_id="bot-1",
+                date_str=dt.date(2026, 8, 7),
+            ),
+            self.session,
+        ).items[0]
+        released = release(
+            RoastReservationMutationRequest(
+                reservation_id=reservation.reservation_id,
+                claim_token=reservation.claim_token,
+            ),
+            self.session,
+        )
+        reservation = claim(
+            RoastReservationClaimRequest(
+                delivery_bot_id="bot-1",
+                date_str=dt.date(2026, 8, 7),
+            ),
+            self.session,
+        ).items[0]
+
+        saved = save_outcome(
+            RoastReservationOutcomeRequest(
+                reservation_id=reservation.reservation_id,
+                claim_token=reservation.claim_token,
+                outcome_snapshot={"event_type": "escape"},
+            ),
+            self.session,
+        )
+
+        self.assertTrue(released.ok)
+        self.assertTrue(saved.ok)
+        self.assertEqual(saved.reservation.status, "sending")
+
+        # 旧 Plus 的完成请求没有 event 字段，随后再通过旧 /events 写日报。
+        completed = complete(
+            RoastReservationCompleteRequest(
+                reservation_id=reservation.reservation_id,
+                claim_token=reservation.claim_token,
+            ),
+            self.session,
+        )
+        legacy_event = EventCreateRequest(
+            event_type="escape",
+            attacker_id="wrong-owner",
+            target_id="wrong-target",
+            group_id="999",
+            date_str=dt.date(2026, 8, 8),
+            reservation_id=created.reservation.reservation_id,
+            participant_ids=["intruder"],
+            participant_count=99,
+        )
+        create_event(legacy_event, self.session)
+        create_event(legacy_event, self.session)
+        events = self.session.scalars(
+            select(RoastEvent).where(
+                RoastEvent.reservation_id == created.reservation.reservation_id
+            )
+        ).all()
+
+        self.assertTrue(completed.ok)
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual(
+            (
+                event.date_str,
+                event.group_id,
+                event.attacker_id,
+                event.target_id,
+            ),
+            (dt.date(2026, 8, 7), "100", "a", "target"),
+        )
+        self.assertEqual(event.participant_snapshot["ids"], ["a"])
 
     def test_stale_pre_send_processing_is_still_recoverable(self):
         created = prepare_reservation(self.session, self._request())
@@ -321,7 +602,7 @@ class CloudRoastReservationTests(unittest.TestCase):
         )
         self.session.commit()
         first = claim(
-            RoastReservationClaimRequest(delivery_bot_id="bot-1", date_str=dt.date(2026, 8, 7)),
+            self._claim_request(),
             self.session,
         ).items[0]
         row = self.session.scalar(
@@ -331,7 +612,7 @@ class CloudRoastReservationTests(unittest.TestCase):
         self.session.commit()
 
         reclaimed = claim(
-            RoastReservationClaimRequest(delivery_bot_id="bot-1", date_str=dt.date(2026, 8, 7)),
+            self._claim_request(),
             self.session,
         ).items[0]
 
@@ -411,10 +692,134 @@ class CloudRoastReservationTests(unittest.TestCase):
                 "/v1/roast-reservations/owned",
                 "/v1/roast-reservations/claim",
                 "/v1/roast-reservations/outcome",
+                "/v1/roast-reservations/outcome/prepare",
+                "/v1/roast-reservations/sending",
                 "/v1/roast-reservations/complete",
                 "/v1/roast-reservations/release",
             }.issubset(route_paths)
         )
+
+    def test_reservation_event_snapshot_preserves_actual_backfire_victim(self):
+        create_event(
+            EventCreateRequest(
+                event_type="backfire",
+                attacker_id="owner",
+                target_id="target",
+                group_id="100",
+                date_str=dt.date(2026, 8, 7),
+                reservation_id="reservation",
+                participant_ids=["owner", "helper"],
+                participant_names=["主厨", "帮厨"],
+                participant_count=2,
+                backfire_victim_id="helper",
+                backfire_victim_name="帮厨",
+            ),
+            self.session,
+        )
+
+        item = list_events(dt.date(2026, 8, 7), "100", self.session).items[0]
+
+        self.assertEqual((item.attacker, item.target), ("owner", "target"))
+        self.assertEqual((item.backfire_victim_id, item.backfire_victim_name), ("helper", "帮厨"))
+
+    def test_complete_atomically_records_reservation_event_and_is_idempotent(self):
+        prepare_reservation(self.session, self._request())
+        self.session.commit()
+        activate_target_reservations(
+            self.session,
+            date_str=dt.date(2026, 8, 7),
+            target_id="target",
+            target_pig_id="pig-target",
+        )
+        self.session.commit()
+        reservation = claim(self._claim_request(), self.session).items[0]
+        prepare_outcome(
+            RoastReservationOutcomeRequest(
+                reservation_id=reservation.reservation_id,
+                claim_token=reservation.claim_token,
+                outcome_snapshot={"event_type": "escape"},
+            ),
+            self.session,
+        )
+        mark_sending(
+            RoastReservationMutationRequest(
+                reservation_id=reservation.reservation_id,
+                claim_token=reservation.claim_token,
+            ),
+            self.session,
+        )
+        request = RoastReservationCompleteRequest(
+            reservation_id=reservation.reservation_id,
+            claim_token=reservation.claim_token,
+            event=EventCreateRequest(
+                event_type="escape",
+                attacker_id="wrong-owner",
+                target_id="wrong-target",
+                attacker_name="错误主厨",
+                target_name="错误目标",
+                group_id="999",
+                date_str=dt.date(2026, 8, 8),
+                reservation_id="wrong-reservation",
+                participant_ids=["intruder"],
+                participant_names=["闯入者"],
+                participant_count=99,
+            ),
+        )
+
+        first = complete(request, self.session)
+        repeated = complete(request, self.session)
+        events = self.session.scalars(
+            select(RoastEvent).where(RoastEvent.reservation_id == reservation.reservation_id)
+        ).all()
+
+        self.assertTrue(first.ok and first.event_recorded)
+        self.assertTrue(repeated.ok and repeated.event_recorded)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(
+            (
+                events[0].reservation_id,
+                events[0].date_str,
+                events[0].group_id,
+                events[0].attacker_id,
+                events[0].attacker_name,
+                events[0].target_id,
+                events[0].target_name,
+            ),
+            (
+                reservation.reservation_id,
+                dt.date(2026, 8, 7),
+                "100",
+                "a",
+                "A",
+                "target",
+                "Target",
+            ),
+        )
+        self.assertEqual(
+            events[0].participant_snapshot,
+            {
+                "ids": ["a"],
+                "names": ["A"],
+                "count": 1,
+                "backfire_victim_id": "",
+                "backfire_victim_name": "",
+            },
+        )
+
+    def test_event_without_date_uses_rollpig_business_date(self):
+        with patch("rollpig_cloud.services.events.rollpig_today", return_value=dt.date(2026, 8, 9)):
+            create_event(
+                EventCreateRequest(
+                    event_type="success",
+                    attacker_id="a",
+                    target_id="b",
+                    group_id="100",
+                ),
+                self.session,
+            )
+
+        events = self.session.scalars(select(RoastEvent)).all()
+        self.assertEqual([event.date_str for event in events], [dt.date(2026, 8, 9)])
 
 
 if __name__ == "__main__":
