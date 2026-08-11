@@ -290,13 +290,19 @@ def bind_refill_message(
     *,
     request_id: str,
     message_id: str,
+    now_ts: float | None = None,
 ) -> GroupRoastRefillRequest | None:
     row = session.execute(
         select(GroupRoastRefillRequest)
         .where(GroupRoastRefillRequest.request_id == str(request_id))
         .with_for_update()
     ).scalar_one_or_none()
-    if row is None or row.status != "voting" or (row.message_id and row.message_id != str(message_id)):
+    if row is None or row.status != "voting":
+        return None
+    # 发送投票消息可能卡住到 TTL 之后；必须在锁内先过期，不能绑定一场已失效投票。
+    if _expire_if_needed(row, _utc_from_ts(now_ts)):
+        return None
+    if not message_id or (row.message_id and row.message_id != str(message_id)):
         return None
     row.message_id = str(message_id)
     session.flush()
@@ -353,7 +359,7 @@ def complete_refill(
             status=row.status,
             request=refill_to_schema(row),
         )
-    if row.message_id != str(message_id):
+    if not row.message_id or not message_id or row.message_id != str(message_id):
         return GroupRoastRefillCompleteResponse(
             completed=False,
             status="message_mismatch",

@@ -102,6 +102,7 @@ class CloudRoastRefillTests(unittest.TestCase):
             self.session,
             request_id=created.request.request_id,
             message_id="message-1",
+            now_ts=NOW_TS + 30,
         )
         self.session.commit()
         self._mark("100", "late")
@@ -138,6 +139,43 @@ class CloudRoastRefillTests(unittest.TestCase):
 
         next_round = self._prepare(now_ts=NOW_TS + 62)
         self.assertEqual((next_round.request.success_count_before, next_round.request.required_ratio), (1, 35))
+
+    def test_complete_rejects_request_without_bound_poll_message(self):
+        self._mark("100", "a", "b", "c", "d", "e")
+        created = self._prepare()
+
+        completed = complete_refill(
+            self.session,
+            request_id=created.request.request_id,
+            message_id="",
+            voter_ids=["a", "b", "c"],
+            excluded_user_ids=[],
+            now_ts=NOW_TS + 30,
+        )
+
+        self.assertFalse(completed.completed)
+        self.assertEqual(completed.status, "message_mismatch")
+        self.assertFalse(self.session.scalars(select(UserUsage)).all())
+
+    def test_bind_rejects_and_expires_request_after_ttl(self):
+        self._mark("100", "a", "b", "c", "d", "e")
+        created = self._prepare()
+
+        bound = bind_refill_message(
+            self.session,
+            request_id=created.request.request_id,
+            message_id="message-late",
+            now_ts=NOW_TS + 601,
+        )
+        self.session.commit()
+        row = self.session.scalar(
+            select(GroupRoastRefillRequest).where(
+                GroupRoastRefillRequest.request_id == created.request.request_id
+            )
+        )
+
+        self.assertIsNone(bound)
+        self.assertEqual((row.status, row.active_key, row.message_id), ("expired", None, ""))
 
     def test_expiry_persists_and_does_not_increase_success_count(self):
         self._mark("100", "a", "b", "c", "d", "e")
