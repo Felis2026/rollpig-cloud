@@ -24,7 +24,7 @@ from ..schemas import (
     UnrolledRoastAttemptRequest,
     UnrolledRoastAttemptResponse,
 )
-from ..services.events import record_roast_event
+from ..services.events import bind_reservation_event, record_roast_event
 from ..services.reservations import activate_if_target_already_rolled, prepare_reservation, reservation_to_schema
 
 
@@ -234,19 +234,23 @@ def complete(req: RoastReservationCompleteRequest, session: Session = Depends(ge
         or row.status not in {"sending", "completed"}
     ):
         return RoastReservationMutationResponse(ok=False)
-    event_recorded = False
-    if req.event is not None:
-        if req.event.reservation_id != req.reservation_id:
-            return RoastReservationMutationResponse(ok=False)
     if row.status != "completed":
         row.status = "completed"
         row.completed_at = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    reservation_item = reservation_to_schema(session, row)
+    event_recorded = False
     if req.event is not None:
-        event_recorded = record_roast_event(session, req.event)
+        # 完成请求发生在外部消息已发送之后；即使客户端事件身份字段有误，也不能让
+        # 预约永久卡在 sending。Cloud 覆盖身份字段后原子完成并记录结果。
+        event_recorded = record_roast_event(
+            session,
+            bind_reservation_event(reservation_item, req.event),
+            reservation=reservation_item,
+        )
     session.commit()
     return RoastReservationMutationResponse(
         ok=True,
-        reservation=reservation_to_schema(session, row),
+        reservation=reservation_item,
         event_recorded=event_recorded,
     )
 

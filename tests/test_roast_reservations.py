@@ -367,6 +367,13 @@ class CloudRoastReservationTests(unittest.TestCase):
             ),
             self.session,
         )
+        refused_release = release(
+            RoastReservationMutationRequest(
+                reservation_id=reservation.reservation_id,
+                claim_token=reservation.claim_token,
+            ),
+            self.session,
+        )
         row = self.session.scalar(
             select(RoastReservation).where(RoastReservation.reservation_id == created.reservation.reservation_id)
         )
@@ -380,6 +387,7 @@ class CloudRoastReservationTests(unittest.TestCase):
 
         self.assertEqual(saved.reservation.status, "prepared")
         self.assertEqual(sending.reservation.status, "sending")
+        self.assertFalse(refused_release.ok)
         self.assertFalse(reclaimed.items)
 
     def test_stale_prepared_snapshot_is_recoverable(self):
@@ -499,7 +507,7 @@ class CloudRoastReservationTests(unittest.TestCase):
         self.assertNotEqual(legacy.claim_token, current.claim_token)
 
     def test_legacy_outcome_endpoint_keeps_old_client_sending_semantics(self):
-        prepare_reservation(self.session, self._request())
+        created = prepare_reservation(self.session, self._request())
         self.session.commit()
         activate_target_reservations(
             self.session,
@@ -509,7 +517,24 @@ class CloudRoastReservationTests(unittest.TestCase):
         )
         self.session.commit()
         reservation = claim(
-            self._claim_request(),
+            RoastReservationClaimRequest(
+                delivery_bot_id="bot-1",
+                date_str=dt.date(2026, 8, 7),
+            ),
+            self.session,
+        ).items[0]
+        released = release(
+            RoastReservationMutationRequest(
+                reservation_id=reservation.reservation_id,
+                claim_token=reservation.claim_token,
+            ),
+            self.session,
+        )
+        reservation = claim(
+            RoastReservationClaimRequest(
+                delivery_bot_id="bot-1",
+                date_str=dt.date(2026, 8, 7),
+            ),
             self.session,
         ).items[0]
 
@@ -522,8 +547,49 @@ class CloudRoastReservationTests(unittest.TestCase):
             self.session,
         )
 
+        self.assertTrue(released.ok)
         self.assertTrue(saved.ok)
         self.assertEqual(saved.reservation.status, "sending")
+
+        # 旧 Plus 的完成请求没有 event 字段，随后再通过旧 /events 写日报。
+        completed = complete(
+            RoastReservationCompleteRequest(
+                reservation_id=reservation.reservation_id,
+                claim_token=reservation.claim_token,
+            ),
+            self.session,
+        )
+        legacy_event = EventCreateRequest(
+            event_type="escape",
+            attacker_id="wrong-owner",
+            target_id="wrong-target",
+            group_id="999",
+            date_str=dt.date(2026, 8, 8),
+            reservation_id=created.reservation.reservation_id,
+            participant_ids=["intruder"],
+            participant_count=99,
+        )
+        create_event(legacy_event, self.session)
+        create_event(legacy_event, self.session)
+        events = self.session.scalars(
+            select(RoastEvent).where(
+                RoastEvent.reservation_id == created.reservation.reservation_id
+            )
+        ).all()
+
+        self.assertTrue(completed.ok)
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual(
+            (
+                event.date_str,
+                event.group_id,
+                event.attacker_id,
+                event.target_id,
+            ),
+            (dt.date(2026, 8, 7), "100", "a", "target"),
+        )
+        self.assertEqual(event.participant_snapshot["ids"], ["a"])
 
     def test_stale_pre_send_processing_is_still_recoverable(self):
         created = prepare_reservation(self.session, self._request())
@@ -687,11 +753,16 @@ class CloudRoastReservationTests(unittest.TestCase):
             claim_token=reservation.claim_token,
             event=EventCreateRequest(
                 event_type="escape",
-                attacker_id="a",
-                target_id="target",
-                group_id="100",
-                date_str=dt.date(2026, 8, 7),
-                reservation_id=reservation.reservation_id,
+                attacker_id="wrong-owner",
+                target_id="wrong-target",
+                attacker_name="错误主厨",
+                target_name="错误目标",
+                group_id="999",
+                date_str=dt.date(2026, 8, 8),
+                reservation_id="wrong-reservation",
+                participant_ids=["intruder"],
+                participant_names=["闯入者"],
+                participant_count=99,
             ),
         )
 
@@ -704,6 +775,36 @@ class CloudRoastReservationTests(unittest.TestCase):
         self.assertTrue(first.ok and first.event_recorded)
         self.assertTrue(repeated.ok and repeated.event_recorded)
         self.assertEqual(len(events), 1)
+        self.assertEqual(
+            (
+                events[0].reservation_id,
+                events[0].date_str,
+                events[0].group_id,
+                events[0].attacker_id,
+                events[0].attacker_name,
+                events[0].target_id,
+                events[0].target_name,
+            ),
+            (
+                reservation.reservation_id,
+                dt.date(2026, 8, 7),
+                "100",
+                "a",
+                "A",
+                "target",
+                "Target",
+            ),
+        )
+        self.assertEqual(
+            events[0].participant_snapshot,
+            {
+                "ids": ["a"],
+                "names": ["A"],
+                "count": 1,
+                "backfire_victim_id": "",
+                "backfire_victim_name": "",
+            },
+        )
 
     def test_event_without_date_uses_rollpig_business_date(self):
         with patch("rollpig_cloud.services.events.rollpig_today", return_value=dt.date(2026, 8, 9)):

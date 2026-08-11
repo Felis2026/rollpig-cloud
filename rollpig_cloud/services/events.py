@@ -4,23 +4,65 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import rollpig_today
-from ..models import RoastEvent
-from ..schemas import EventCreateRequest
+from ..models import RoastEvent, RoastReservation
+from ..schemas import EventCreateRequest, RoastReservationItem
 from .roast_refills import mark_group_active_users
+
+
+# ================================ 预约事件身份绑定 ================================ #
+
+def bind_reservation_event(
+    reservation: RoastReservationItem,
+    req: EventCreateRequest,
+) -> EventCreateRequest:
+    """以 Cloud 预约快照为身份真源，仅保留客户端计算出的结果字段。"""
+
+    return req.model_copy(update={
+        "date_str": reservation.date_str,
+        "group_id": reservation.group_id,
+        "attacker_id": reservation.owner_id,
+        "attacker_name": reservation.owner_name,
+        "target_id": reservation.target_id,
+        "target_name": reservation.target_name,
+        "reservation_id": reservation.reservation_id,
+        "participant_ids": [item.user_id for item in reservation.participants],
+        "participant_names": [item.display_name for item in reservation.participants],
+        "participant_count": len(reservation.participants),
+    })
 
 
 # ================================ 事件原子写入 ================================ #
 
-def record_roast_event(session: Session, req: EventCreateRequest) -> bool:
+def record_roast_event(
+    session: Session,
+    req: EventCreateRequest,
+    *,
+    reservation: RoastReservationItem | None = None,
+) -> bool:
     """写入烧烤事件；预约事件按 reservation_id 幂等，并同步登记群日活。"""
 
-    target_date = req.date_str or rollpig_today()
     if req.reservation_id:
+        if reservation is None:
+            reservation_row = session.execute(
+                select(RoastReservation).where(
+                    RoastReservation.reservation_id == req.reservation_id
+                ).with_for_update()
+            ).scalar_one_or_none()
+            if reservation_row is not None:
+                # 旧 Plus 会先 /complete、再单独调用 /events；这里回查预约记录，
+                # 同时锁定预约，使并发重试在检查事件前串行化。
+                from .reservations import reservation_to_schema
+
+                reservation = reservation_to_schema(session, reservation_row)
         existing = session.execute(
             select(RoastEvent.id).where(RoastEvent.reservation_id == req.reservation_id).limit(1)
         ).first()
         if existing is not None:
             return True
+        if reservation is not None:
+            req = bind_reservation_event(reservation, req)
+
+    target_date = req.date_str or rollpig_today()
 
     session.add(
         RoastEvent(
