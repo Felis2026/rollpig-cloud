@@ -10,44 +10,14 @@ from ..auth import verify_token
 from ..db import get_session
 from ..models import RoastEvent
 from ..schemas import EventCreateRequest, EventItem, EventListResponse
-from ..services.roast_refills import mark_group_active_users
+from ..services.events import record_roast_event
 
 router = APIRouter(prefix="/v1/events", tags=["events"], dependencies=[Depends(verify_token)])
 
 
 @router.post("")
 def create_event(req: EventCreateRequest, session: Session = Depends(get_session)):
-    target_date = req.date_str or dt.date.today()
-    session.add(
-        RoastEvent(
-            date_str=target_date,
-            group_id=req.group_id,
-            event_type=req.event_type,
-            attacker_id=req.attacker_id,
-            target_id=req.target_id,
-            attacker_name=req.attacker_name,
-            target_name=req.target_name,
-            food_name=req.food,
-            reservation_id=req.reservation_id,
-            participant_snapshot={
-                "ids": req.participant_ids,
-                "names": req.participant_names,
-                "count": req.participant_count,
-                "backfire_victim_id": req.backfire_victim_id,
-                "backfire_victim_name": req.backfire_victim_name,
-            } if req.reservation_id else None,
-        )
-    )
-    if req.group_id:
-        active_user_ids = [req.attacker_id, *req.participant_ids]
-        if req.event_type != "bot_backfire":
-            active_user_ids.append(req.target_id)
-        mark_group_active_users(
-            session,
-            date_str=target_date,
-            group_id=req.group_id,
-            user_ids=active_user_ids,
-        )
+    record_roast_event(session, req)
     session.commit()
     return {"ok": True}
 

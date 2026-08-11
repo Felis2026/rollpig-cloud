@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.orm import Session
@@ -14,10 +15,18 @@ os.environ.setdefault("ROLLPIG_CLOUD_DATABASE_URL", "sqlite+pysqlite:///:memory:
 from rollpig_cloud.db import Base
 from rollpig_cloud.main import app
 from rollpig_cloud.migrations import ensure_runtime_migrations
-from rollpig_cloud.models import DailyRoll, GroupProtection, RoastReservation, RoastReservationParticipant, UserUsage
+from rollpig_cloud.models import (
+    DailyRoll,
+    GroupProtection,
+    RoastEvent,
+    RoastReservation,
+    RoastReservationParticipant,
+    UserUsage,
+)
 from rollpig_cloud.schemas import ConsumeForceRequest, ConsumeRoastRequest, EventCreateRequest, RoastReservationPrepareRequest
 from rollpig_cloud.schemas import (
     RoastReservationClaimRequest,
+    RoastReservationCompleteRequest,
     RoastReservationMutationRequest,
     RoastReservationOutcomeRequest,
 )
@@ -310,7 +319,7 @@ class CloudRoastReservationTests(unittest.TestCase):
         self.assertTrue(late_prepare_retry.ok)
 
         completed = complete(
-            RoastReservationMutationRequest(
+            RoastReservationCompleteRequest(
                 reservation_id=reclaimed.reservation_id,
                 claim_token=reclaimed.claim_token,
             ),
@@ -318,7 +327,7 @@ class CloudRoastReservationTests(unittest.TestCase):
         )
         self.assertTrue(completed.ok)
         repeated = complete(
-            RoastReservationMutationRequest(
+            RoastReservationCompleteRequest(
                 reservation_id=reclaimed.reservation_id,
                 claim_token=reclaimed.claim_token,
             ),
@@ -646,6 +655,70 @@ class CloudRoastReservationTests(unittest.TestCase):
 
         self.assertEqual((item.attacker, item.target), ("owner", "target"))
         self.assertEqual((item.backfire_victim_id, item.backfire_victim_name), ("helper", "帮厨"))
+
+    def test_complete_atomically_records_reservation_event_and_is_idempotent(self):
+        prepare_reservation(self.session, self._request())
+        self.session.commit()
+        activate_target_reservations(
+            self.session,
+            date_str=dt.date(2026, 8, 7),
+            target_id="target",
+            target_pig_id="pig-target",
+        )
+        self.session.commit()
+        reservation = claim(self._claim_request(), self.session).items[0]
+        prepare_outcome(
+            RoastReservationOutcomeRequest(
+                reservation_id=reservation.reservation_id,
+                claim_token=reservation.claim_token,
+                outcome_snapshot={"event_type": "escape"},
+            ),
+            self.session,
+        )
+        mark_sending(
+            RoastReservationMutationRequest(
+                reservation_id=reservation.reservation_id,
+                claim_token=reservation.claim_token,
+            ),
+            self.session,
+        )
+        request = RoastReservationCompleteRequest(
+            reservation_id=reservation.reservation_id,
+            claim_token=reservation.claim_token,
+            event=EventCreateRequest(
+                event_type="escape",
+                attacker_id="a",
+                target_id="target",
+                group_id="100",
+                date_str=dt.date(2026, 8, 7),
+                reservation_id=reservation.reservation_id,
+            ),
+        )
+
+        first = complete(request, self.session)
+        repeated = complete(request, self.session)
+        events = self.session.scalars(
+            select(RoastEvent).where(RoastEvent.reservation_id == reservation.reservation_id)
+        ).all()
+
+        self.assertTrue(first.ok and first.event_recorded)
+        self.assertTrue(repeated.ok and repeated.event_recorded)
+        self.assertEqual(len(events), 1)
+
+    def test_event_without_date_uses_rollpig_business_date(self):
+        with patch("rollpig_cloud.services.events.rollpig_today", return_value=dt.date(2026, 8, 9)):
+            create_event(
+                EventCreateRequest(
+                    event_type="success",
+                    attacker_id="a",
+                    target_id="b",
+                    group_id="100",
+                ),
+                self.session,
+            )
+
+        events = self.session.scalars(select(RoastEvent)).all()
+        self.assertEqual([event.date_str for event in events], [dt.date(2026, 8, 9)])
 
 
 if __name__ == "__main__":

@@ -240,9 +240,15 @@ class RoastReservationMutationRequest(BaseModel):
     claim_token: str
 
 
+class RoastReservationCompleteRequest(RoastReservationMutationRequest):
+    # 新 Plus 会把预约事件一并提交，使完成状态与日报数据在同一事务中落库。
+    event: EventCreateRequest | None = None
+
+
 class RoastReservationMutationResponse(BaseModel):
     ok: bool
     reservation: RoastReservationItem | None = None
+    event_recorded: bool = False
 
 
 # ================================ 烤箱补货 API ================================ #

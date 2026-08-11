@@ -14,6 +14,7 @@ from ..models import RoastReservation, UnrolledRoastAttempt
 from ..schemas import (
     RoastReservationClaimRequest,
     RoastReservationClaimResponse,
+    RoastReservationCompleteRequest,
     RoastReservationMutationRequest,
     RoastReservationMutationResponse,
     RoastReservationOutcomeRequest,
@@ -23,6 +24,7 @@ from ..schemas import (
     UnrolledRoastAttemptRequest,
     UnrolledRoastAttemptResponse,
 )
+from ..services.events import record_roast_event
 from ..services.reservations import activate_if_target_already_rolled, prepare_reservation, reservation_to_schema
 
 
@@ -220,7 +222,9 @@ def mark_sending(req: RoastReservationMutationRequest, session: Session = Depend
 
 
 @router.post("/complete", response_model=RoastReservationMutationResponse)
-def complete(req: RoastReservationMutationRequest, session: Session = Depends(get_session)):
+def complete(req: RoastReservationCompleteRequest, session: Session = Depends(get_session)):
+    """幂等完成预约，并在提供事件时与完成状态一起原子提交。"""
+
     row = session.execute(
         select(RoastReservation).where(RoastReservation.reservation_id == req.reservation_id).with_for_update()
     ).scalar_one_or_none()
@@ -230,11 +234,21 @@ def complete(req: RoastReservationMutationRequest, session: Session = Depends(ge
         or row.status not in {"sending", "completed"}
     ):
         return RoastReservationMutationResponse(ok=False)
+    event_recorded = False
+    if req.event is not None:
+        if req.event.reservation_id != req.reservation_id:
+            return RoastReservationMutationResponse(ok=False)
     if row.status != "completed":
         row.status = "completed"
         row.completed_at = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    if req.event is not None:
+        event_recorded = record_roast_event(session, req.event)
     session.commit()
-    return RoastReservationMutationResponse(ok=True, reservation=reservation_to_schema(session, row))
+    return RoastReservationMutationResponse(
+        ok=True,
+        reservation=reservation_to_schema(session, row),
+        event_recorded=event_recorded,
+    )
 
 
 @router.post("/release", response_model=RoastReservationMutationResponse)

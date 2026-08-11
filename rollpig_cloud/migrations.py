@@ -6,10 +6,11 @@ import time
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 
+from .config import ROLLPIG_TIMEZONE
+
 
 DEFAULT_ROAST_CHARGE_MAX = 2
 DEFAULT_ROAST_CHARGE_RECOVER_SECONDS = 8 * 3600
-ROLLPIG_TIMEZONE = dt.timezone(dt.timedelta(hours=8), "Asia/Shanghai")
 
 
 def _quote_identifier(name: str) -> str:
