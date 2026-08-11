@@ -201,10 +201,12 @@ docker run -d \
 | `POST` | `/v1/roast-reservations/unrolled-attempt` | 记录用户当天未抽猪先烤的违规次数 |
 | `POST` | `/v1/roast-reservations/prepare` | 原子检查目标、群保护、预约状态并消费创建资源或免费加入 |
 | `GET` | `/v1/roast-reservations/owned` | 查询指定 Bot 当天是否持有未完成预约 |
-| `POST` | `/v1/roast-reservations/claim` | 原子领取当前 Bot 可投递的 ready 预约 |
-| `POST` | `/v1/roast-reservations/outcome` | 首次保存固定烧烤结果快照；重复请求不覆盖 |
+| `POST` | `/v1/roast-reservations/claim` | 原子领取可投递预约，并在同一响应返回当前 Bot 是否仍持有未完成预约 |
+| `POST` | `/v1/roast-reservations/outcome/prepare` | 幂等保存固定结果并进入可安全重领的 `prepared` |
+| `POST` | `/v1/roast-reservations/sending` | 幂等提交发送意图；进入后不再自动释放或重领 |
+| `POST` | `/v1/roast-reservations/outcome` | 兼容旧 Plus：保存固定结果并直接进入 `sending` |
 | `POST` | `/v1/roast-reservations/complete` | 幂等完成已发送预约 |
-| `POST` | `/v1/roast-reservations/release` | 发送失败后释放预约，保留固定结果等待重试 |
+| `POST` | `/v1/roast-reservations/release` | 外部发送前释放 `processing/prepared`，保留固定结果等待重试 |
 
 ## 🔄 数据迁移
 
@@ -221,9 +223,9 @@ poetry run python tools/backfill_p1a_progress.py
 poetry run python tools/migrate_roast_charges.py
 ```
 
-服务启动时也会执行轻量运行期迁移：自动为旧 `user_usage` 表补齐充能列，并通过 SQLAlchemy `create_all` 新建 `unrolled_roast_attempts`、`roast_reservations` 与 `roast_reservation_participants`。升级不会修改或删除既有业务表数据。
+服务启动时也会执行轻量运行期迁移：自动为旧 `user_usage` 表补齐充能列，并通过 SQLAlchemy `create_all` 新建 `unrolled_roast_attempts`、`roast_reservations` 与 `roast_reservation_participants`。本次预约可靠性更新没有 schema migration，但会执行一次幂等、非破坏性的数据状态修复：旧版 `processing + outcome_snapshot` 记录统一冻结为 `sending`，避免升级后把一条可能已经发出的群消息自动重发。
 
-预约结果由负责群聊的 Bot 在已有用户请求上机会式领取，单 Bot 最多每 90 秒检查一次；没有用户请求时不会产生后台轮询。领取后会先保存固定结果再发送，失败释放后重试仍使用同一结果。
+预约结果由负责群聊的 Owner Bot 领取。只要本机仍持有未完成预约，就会在已有用户请求之外每 60 秒最多发起一次合并领取请求；该请求同时返回可投递项目和是否仍需继续轮询，没有预约时自动停止。领取后的状态依次为 `processing → prepared → sending → completed`：`processing/prepared` 可在租约过期后重领，`sending` 表示“已经提交外部发送意图、结果可能不确定”，永不自动重领。`prepare`、`sending` 与 `complete` 均允许同一领取凭证幂等重试。
 
 ## 📦 静态资源包
 

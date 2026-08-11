@@ -95,6 +95,8 @@ class EventCreateRequest(BaseModel):
     participant_ids: list[str] = Field(default_factory=list)
     participant_names: list[str] = Field(default_factory=list)
     participant_count: int = 0
+    backfire_victim_id: str = ""
+    backfire_victim_name: str = ""
 
 
 class EventItem(BaseModel):
@@ -109,6 +111,8 @@ class EventItem(BaseModel):
     participant_ids: list[str] = Field(default_factory=list)
     participant_names: list[str] = Field(default_factory=list)
     participant_count: int = 0
+    backfire_victim_id: str = ""
+    backfire_victim_name: str = ""
 
 
 class EventListResponse(BaseModel):
@@ -215,10 +219,14 @@ class RoastReservationClaimRequest(BaseModel):
     delivery_bot_id: str
     date_str: dt.date
     limit: int = 12
+    # 旧 Plus 未声明该能力；Cloud 会把固定快照作为它认识的 sending 返回。
+    supports_prepared: bool = False
+    excluded_reservation_ids: list[str] = Field(default_factory=list)
 
 
 class RoastReservationClaimResponse(BaseModel):
     items: list[RoastReservationItem] = Field(default_factory=list)
+    has_owned: bool = False
 
 
 class RoastReservationOutcomeRequest(BaseModel):

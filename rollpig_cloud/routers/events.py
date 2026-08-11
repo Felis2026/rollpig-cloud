@@ -32,6 +32,8 @@ def create_event(req: EventCreateRequest, session: Session = Depends(get_session
                 "ids": req.participant_ids,
                 "names": req.participant_names,
                 "count": req.participant_count,
+                "backfire_victim_id": req.backfire_victim_id,
+                "backfire_victim_name": req.backfire_victim_name,
             } if req.reservation_id else None,
         )
     )
@@ -59,6 +61,8 @@ def list_events(date_str: dt.date, group_id: str | None = None, session: Session
                 participant_ids=(row.participant_snapshot or {}).get("ids", []),
                 participant_names=(row.participant_snapshot or {}).get("names", []),
                 participant_count=int((row.participant_snapshot or {}).get("count", 0)),
+                backfire_victim_id=(row.participant_snapshot or {}).get("backfire_victim_id", ""),
+                backfire_victim_name=(row.participant_snapshot or {}).get("backfire_victim_name", ""),
             )
             for row in rows
         ]
