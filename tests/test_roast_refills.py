@@ -21,9 +21,11 @@ from rollpig_cloud.models import (
 )
 from rollpig_cloud.schemas import GroupRoastRefillPrepareRequest
 from rollpig_cloud.services.roast_refills import (
+    ROAST_REFILL_THRESHOLD_POLICY,
     bind_refill_message,
     complete_refill,
     get_active_refill,
+    legacy_refill_threshold,
     mark_group_active_users,
     prepare_refill,
     refill_threshold,
@@ -53,26 +55,53 @@ class CloudRoastRefillTests(unittest.TestCase):
         )
         self.session.commit()
 
-    def _prepare(self, group_id: str = "100", now_ts: float = NOW_TS):
+    def _prepare(
+        self,
+        group_id: str = "100",
+        now_ts: float = NOW_TS,
+        threshold_policy: str | None = ROAST_REFILL_THRESHOLD_POLICY,
+    ):
+        request_data = {
+            "group_id": group_id,
+            "initiator_id": "admin",
+            "initiator_name": "管理员",
+            "delivery_bot_id": "bot",
+            "date_str": DATE,
+            "now_ts": now_ts,
+        }
+        if threshold_policy is not None:
+            request_data["threshold_policy"] = threshold_policy
         response = prepare_refill(
             self.session,
-            GroupRoastRefillPrepareRequest(
-                group_id=group_id,
-                initiator_id="admin",
-                initiator_name="管理员",
-                delivery_bot_id="bot",
-                date_str=DATE,
-                now_ts=now_ts,
-            ),
+            GroupRoastRefillPrepareRequest(**request_data),
         )
         self.session.commit()
         return response
 
     def test_threshold_matrix(self):
-        self.assertEqual([refill_threshold(5, index)[1] for index in range(5)], [2, 2, 3, 3, 4])
-        self.assertEqual([refill_threshold(10, index)[1] for index in range(5)], [3, 4, 5, 6, 7])
-        self.assertEqual([refill_threshold(20, index)[1] for index in range(5)], [5, 7, 9, 11, 13])
-        self.assertEqual(refill_threshold(20, 99), (65, 13))
+        self.assertEqual([refill_threshold(5, index)[1] for index in range(5)], [2, 2, 3, 3, 3])
+        self.assertEqual([refill_threshold(10, index)[1] for index in range(5)], [3, 4, 5, 6, 6])
+        self.assertEqual([refill_threshold(20, index)[1] for index in range(5)], [5, 7, 9, 11, 11])
+        self.assertEqual([refill_threshold(50, index)[1] for index in range(5)], [8, 12, 16, 20, 20])
+        self.assertEqual(refill_threshold(100, 99), (55, 20))
+
+    def test_prepare_negotiates_capped_policy_and_preserves_legacy_default(self):
+        user_ids = [f"pig-{index}" for index in range(40)]
+        self._mark("capped", *user_ids)
+        self._mark("legacy", *user_ids)
+
+        capped = self._prepare("capped")
+        created = self._prepare("legacy", threshold_policy=None)
+
+        self.assertEqual(
+            (capped.request.active_count_snapshot, capped.request.required_ratio, capped.request.required_votes),
+            (40, 25, 8),
+        )
+        self.assertEqual(
+            (created.request.active_count_snapshot, created.request.required_ratio, created.request.required_votes),
+            (40, 25, 10),
+        )
+        self.assertEqual(legacy_refill_threshold(100, 99), (65, 65))
 
     def test_prepare_freezes_snapshot_and_keeps_one_active_request(self):
         self._mark("100", "a", "b")
@@ -264,7 +293,7 @@ class CloudRoastRefillTests(unittest.TestCase):
         self.assertFalse(active)
 
     def test_application_exposes_all_refill_routes(self):
-        self.assertEqual(app.version, "0.4.0")
+        self.assertEqual(app.version, "0.4.1")
         paths = set(app.openapi()["paths"])
         self.assertTrue({
             "/v1/group-roast-refills/active-users/mark",

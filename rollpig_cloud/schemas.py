@@ -290,6 +290,7 @@ class GroupRoastRefillPrepareRequest(BaseModel):
     delivery_bot_id: str
     date_str: dt.date
     now_ts: float | None = None
+    threshold_policy: str = ""
 
 
 class GroupRoastRefillPrepareResponse(BaseModel):

@@ -5,6 +5,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from . import __version__
 from .db import init_db
 from .routers.catalog import router as catalog_router
 from .routers.collections import router as collections_router
@@ -18,7 +19,7 @@ from .routers.protections import router as protections_router
 from .routers.roast_reservations import router as roast_reservations_router
 from .routers.roast_refills import router as roast_refills_router
 
-app = FastAPI(title="rollpig-cloud", version="0.4.0")
+app = FastAPI(title="rollpig-cloud", version=__version__)
 STATIC_DIR = Path(__file__).resolve().parents[1] / "static"
 RESOURCES_DIR = STATIC_DIR / "resources"
 

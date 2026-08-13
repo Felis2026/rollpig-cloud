@@ -21,7 +21,9 @@ from .usage import clamp_charge_settings
 
 
 ROAST_REFILL_TTL_SECONDS = 10 * 60
-ROAST_REFILL_RATIOS = (25, 35, 45, 55, 65)
+ROAST_REFILL_THRESHOLD_POLICY = "capped-v1"
+ROAST_REFILL_THRESHOLD_STEPS = ((25, 8), (35, 12), (45, 16), (55, 20))
+LEGACY_ROAST_REFILL_RATIOS = (25, 35, 45, 55, 65)
 
 
 def _utc_from_ts(value: float | None = None) -> dt.datetime:
@@ -39,11 +41,25 @@ def _active_key(date_str: dt.date, group_id: str) -> str:
 
 
 def refill_threshold(active_count: int, success_count: int) -> tuple[int, int]:
-    """返回本轮百分比与标准向上取整票数。"""
+    """返回封顶后的本轮门槛；第四次起固定为 55% / 20 票。"""
 
     normalized_active = max(0, int(active_count or 0))
     normalized_success = max(0, int(success_count or 0))
-    ratio = ROAST_REFILL_RATIOS[min(normalized_success, len(ROAST_REFILL_RATIOS) - 1)]
+    ratio, vote_cap = ROAST_REFILL_THRESHOLD_STEPS[
+        min(normalized_success, len(ROAST_REFILL_THRESHOLD_STEPS) - 1)
+    ]
+    proportional_votes = (normalized_active * ratio + 99) // 100
+    return ratio, max(2, min(proportional_votes, vote_cap))
+
+
+def legacy_refill_threshold(active_count: int, success_count: int) -> tuple[int, int]:
+    """保留旧 Plus 使用的五档无上限算法，供 Cloud 优先滚动升级。"""
+
+    normalized_active = max(0, int(active_count or 0))
+    normalized_success = max(0, int(success_count or 0))
+    ratio = LEGACY_ROAST_REFILL_RATIOS[
+        min(normalized_success, len(LEGACY_ROAST_REFILL_RATIOS) - 1)
+    ]
     return ratio, max(2, (normalized_active * ratio + 99) // 100)
 
 
@@ -237,7 +253,14 @@ def prepare_refill(session: Session, req: GroupRoastRefillPrepareRequest) -> Gro
             )
         ).scalar_one()
     )
-    ratio, required_votes = refill_threshold(len(active_user_ids), success_count)
+    # 旧 Plus 不会声明门槛能力，继续使用原算法；新 Plus 显式协商后才启用
+    # 封顶门槛，确保 Cloud 可以先部署而不改变旧客户端行为。
+    threshold = (
+        refill_threshold
+        if req.threshold_policy == ROAST_REFILL_THRESHOLD_POLICY
+        else legacy_refill_threshold
+    )
+    ratio, required_votes = threshold(len(active_user_ids), success_count)
     row = GroupRoastRefillRequest(
         request_id=uuid.uuid4().hex,
         active_key=active_key,

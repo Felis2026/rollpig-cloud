@@ -231,6 +231,8 @@ docker run -d \
 | `POST` | `/v1/group-roast-refills/fail` | 将不可继续验票的申请标记失败 |
 | `POST` | `/v1/group-roast-refills/complete` | 按最新日活原子验票、按插件配置上限批量恢复配额并完成申请 |
 
+新版 Plus 会在 `/prepare` 中声明 `capped-v1` 门槛能力：以发起瞬间的活跃人数为固定分母，四档依次使用 25% / 35% / 45% / 55%，并分别封顶为 8 / 12 / 16 / 20 票。未声明该能力的旧版 Plus 继续使用原五档算法，因此可以先升级 Cloud，再滚动升级各 Bot。
+
 ## 🔄 数据迁移
 
 从旧本地 JSON 导入云端：
