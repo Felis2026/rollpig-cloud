@@ -86,6 +86,9 @@ jobs:
         env:
           DEPLOY_PUBLIC_URL: ${{ vars.ROLLPIG_DEPLOY_PUBLIC_URL }}
         run: |
-          curl --fail --silent --show-error \
+          response="$(curl --fail --silent --show-error \
             --retry 5 --retry-delay 3 \
-            "$DEPLOY_PUBLIC_URL" > /dev/null
+            "$DEPLOY_PUBLIC_URL")"
+          python3 -c \
+            'import json, sys; payload = json.loads(sys.argv[1]); assert payload.get("ok") is True, payload' \
+            "$response"

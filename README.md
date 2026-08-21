@@ -122,7 +122,7 @@ ROLLPIG_DEPLOY_SSH_KEY
 ROLLPIG_DEPLOY_KNOWN_HOSTS
 ```
 
-可选在 `production` Environment 中配置变量 `ROLLPIG_DEPLOY_PUBLIC_URL`，例如 `https://pig.felislab.cc/healthz`，用于部署完成后验证公网反向代理链路。
+可选在 `production` Environment 中配置变量 `ROLLPIG_DEPLOY_PUBLIC_URL`，例如 `https://pig.felislab.cc/api/healthz`，用于部署完成后验证公网反向代理链路。工作流会同时校验响应 JSON 中的 `ok=true`，避免前端页面返回 HTTP 200 时被误判为 Cloud 健康。
 
 工作流不会上传 `docker-compose.yml`、Token、数据库地址或资源目录。服务器上的生产配置和资源由宿主机继续保管，GitHub 仅同步可公开的 Cloud 代码、部署脚本与依赖描述。
 
