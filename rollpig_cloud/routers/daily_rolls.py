@@ -93,6 +93,8 @@ def get_or_create_daily_roll(req: DailyRollGetOrCreateRequest, session: Session 
         created.previous_copies = progress.previous_copies
         created.copies_after_roll = progress.copies_after_roll
         created.collection_size_after_roll = progress.collection_size_after_roll
+        created.previous_duplicate_streak = progress.previous_duplicate_streak
+        created.duplicate_streak_after_roll = progress.duplicate_streak_after_roll
         _ensure_group_roll(session, req.group_id, req.user_id, req.proposed_pig_id, req.date_str)
         activate_target_reservations(
             session,
@@ -107,12 +109,7 @@ def get_or_create_daily_roll(req: DailyRollGetOrCreateRequest, session: Session 
             user_id=req.user_id,
             pig_id=req.proposed_pig_id,
         )
-        return build_lookup_response(
-            session,
-            daily_roll=created,
-            created=True,
-            previous_duplicate_streak=progress.previous_duplicate_streak,
-        )
+        return build_lookup_response(session, daily_roll=created, created=True)
     except IntegrityError:
         session.rollback()
         existing = session.execute(
@@ -174,6 +171,8 @@ def complete_daily_roll_snapshot(req: DailyRollSnapshotRequest, session: Session
             existing.previous_copies,
             existing.copies_after_roll,
             existing.collection_size_after_roll,
+            existing.previous_duplicate_streak,
+            existing.duplicate_streak_after_roll,
         )
     ):
         # 旧记录没有抽取时结果，禁止用今天的资源反向补写历史上下文。

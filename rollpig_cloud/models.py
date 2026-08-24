@@ -23,6 +23,8 @@ class DailyRoll(Base):
     previous_copies: Mapped[int | None] = mapped_column(Integer, nullable=True)
     copies_after_roll: Mapped[int | None] = mapped_column(Integer, nullable=True)
     collection_size_after_roll: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    previous_duplicate_streak: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duplicate_streak_after_roll: Mapped[int | None] = mapped_column(Integer, nullable=True)
     resource_version: Mapped[str | None] = mapped_column(String(192), nullable=True)
     appearance_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())

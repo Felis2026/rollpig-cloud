@@ -20,6 +20,7 @@ class CreatedRollProgress:
     copies_after_roll: int
     collection_size_after_roll: int
     previous_duplicate_streak: int
+    duplicate_streak_after_roll: int
 
 
 def get_collection(session: Session, user_id: str, pig_id: str) -> Collection | None:
@@ -124,6 +125,7 @@ def apply_created_roll_progress(session: Session, user_id: str, pig_id: str) -> 
         copies_after_roll=copies,
         collection_size_after_roll=collection_size,
         previous_duplicate_streak=previous_duplicate_streak,
+        duplicate_streak_after_roll=duplicate_streak,
     )
 
 
@@ -132,7 +134,6 @@ def build_lookup_response(
     *,
     daily_roll: DailyRoll | None,
     created: bool,
-    previous_duplicate_streak: int | None = None,
 ) -> DailyRollLookupResponse:
     if daily_roll is None:
         return DailyRollLookupResponse(pig_id=None, created=created)
@@ -152,6 +153,8 @@ def build_lookup_response(
             daily_roll.previous_copies,
             daily_roll.copies_after_roll,
             daily_roll.collection_size_after_roll,
+            daily_roll.previous_duplicate_streak,
+            daily_roll.duplicate_streak_after_roll,
         )
     )
     if growth_snapshot_available:
@@ -176,6 +179,8 @@ def build_lookup_response(
         response_is_new = bool(daily_roll.is_new_pig)
         response_previous_copies = int(daily_roll.previous_copies or 0)
         response_copies = int(daily_roll.copies_after_roll or 0)
+        response_previous_duplicate_streak = int(daily_roll.previous_duplicate_streak or 0)
+        response_duplicate_streak = int(daily_roll.duplicate_streak_after_roll or 0)
     else:
         # 旧行没有历史快照时维持原平铺字段行为，供旧 Plus 继续使用；
         # 新 Plus 只认 outcome_snapshot，不会把当前进度冒充昨日结果。
@@ -183,6 +188,8 @@ def build_lookup_response(
         response_is_new = False
         response_previous_copies = copies
         response_copies = copies
+        response_previous_duplicate_streak = duplicate_streak
+        response_duplicate_streak = duplicate_streak
 
     return DailyRollLookupResponse(
         pig_id=pig_id,
@@ -190,10 +197,8 @@ def build_lookup_response(
         is_new_pig=response_is_new,
         previous_copies=response_previous_copies,
         copies=response_copies,
-        previous_duplicate_streak=(
-            duplicate_streak if previous_duplicate_streak is None else int(previous_duplicate_streak)
-        ),
-        duplicate_streak=duplicate_streak,
+        previous_duplicate_streak=response_previous_duplicate_streak,
+        duplicate_streak=response_duplicate_streak,
         outcome_snapshot=outcome_snapshot,
     )
 
