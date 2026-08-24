@@ -145,7 +145,7 @@ def build_lookup_response(
     copies = int(progress.copies) if progress else (1 if collection else 0)
     duplicate_streak = int(draw_state.duplicate_streak) if draw_state else 0
 
-    snapshot_available = all(
+    growth_snapshot_available = all(
         value is not None
         for value in (
             daily_roll.is_new_pig,
@@ -154,11 +154,20 @@ def build_lookup_response(
             daily_roll.collection_size_after_roll,
         )
     )
-    if snapshot_available:
-        appearance = daily_roll.appearance_snapshot if isinstance(daily_roll.appearance_snapshot, dict) else {}
+    if growth_snapshot_available:
+        appearance_snapshot_available = bool(daily_roll.resource_version) and isinstance(
+            daily_roll.appearance_snapshot,
+            dict,
+        )
+        appearance = daily_roll.appearance_snapshot if appearance_snapshot_available else {}
         outcome_snapshot = DailyRollOutcomeSnapshot(
+            snapshot_available=appearance_snapshot_available,
             collection_size_after_roll=int(daily_roll.collection_size_after_roll or 0),
-            resource_version=str(daily_roll.resource_version or ""),
+            resource_version=(
+                str(daily_roll.resource_version)
+                if appearance_snapshot_available
+                else ""
+            ),
             resolved_variant_level=int(appearance.get("resolved_variant_level") or 0),
             resolved_image_name=str(appearance.get("resolved_image_name") or ""),
             unlocked_variant_levels=[int(level) for level in appearance.get("unlocked_variant_levels", [])],

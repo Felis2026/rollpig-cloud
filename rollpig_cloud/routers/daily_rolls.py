@@ -192,6 +192,7 @@ def complete_daily_roll_snapshot(req: DailyRollSnapshotRequest, session: Session
 
     return DailyRollSnapshotUpdateResponse(
         outcome_snapshot=DailyRollOutcomeSnapshot(
+            snapshot_available=True,
             collection_size_after_roll=int(existing.collection_size_after_roll or 0),
             resource_version=req.resource_version,
             **payload,

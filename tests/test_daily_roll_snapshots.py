@@ -23,7 +23,12 @@ from rollpig_cloud.routers.daily_rolls import (
     get_or_create_daily_roll,
 )
 from rollpig_cloud.routers.events import list_events
-from rollpig_cloud.schemas import DailyRollGetOrCreateRequest, DailyRollSnapshotRequest
+from rollpig_cloud.schemas import (
+    DailyRollGetOrCreateRequest,
+    DailyRollSnapshotRequest,
+    EventCreateRequest,
+)
+from rollpig_cloud.services.events import record_roast_event
 
 
 DATE = dt.date(2026, 8, 23)
@@ -60,6 +65,7 @@ class CloudDailyRollSnapshotTests(unittest.TestCase):
         self.assertTrue(created.is_new_pig)
         self.assertEqual((created.previous_copies, created.copies), (0, 1))
         self.assertEqual(created.outcome_snapshot.collection_size_after_roll, 2)
+        self.assertFalse(created.outcome_snapshot.snapshot_available)
 
         row = self.session.scalar(select(DailyRoll).where(DailyRoll.user_id == "user"))
         self.assertEqual(
@@ -81,6 +87,7 @@ class CloudDailyRollSnapshotTests(unittest.TestCase):
         historical = get_daily_roll_by_date("user", DATE, self.session)
         self.assertEqual((historical.previous_copies, historical.copies), (0, 1))
         self.assertEqual(historical.outcome_snapshot.collection_size_after_roll, 2)
+        self.assertFalse(historical.outcome_snapshot.snapshot_available)
 
     def test_duplicate_roll_saves_previous_and_current_copies(self):
         self.session.add_all(
@@ -145,8 +152,13 @@ class CloudDailyRollSnapshotTests(unittest.TestCase):
         second = complete_daily_roll_snapshot(request, self.session)
 
         self.assertTrue(first.ok and second.ok)
+        self.assertTrue(first.outcome_snapshot.snapshot_available)
         self.assertEqual(first.outcome_snapshot.unlocked_variant_levels, [2])
         self.assertEqual(first.outcome_snapshot.unlocked_variant_fields, ["image", "description"])
+
+        historical = get_daily_roll_by_date("user", DATE, self.session)
+        self.assertTrue(historical.outcome_snapshot.snapshot_available)
+        self.assertEqual(historical.outcome_snapshot.resource_version, "2026-08-20.1")
 
         changed = request.model_copy(update={"resolved_image_name": "other.png"})
         with self.assertRaises(HTTPException) as raised:
@@ -281,6 +293,38 @@ class CloudEventQueryTests(unittest.TestCase):
         self.assertEqual([item.reservation_id for item in response.items], ["reservation-a", "reservation-b"])
         self.assertEqual([item.event_id for item in response.items], ["2", "3"])
         self.assertTrue(all(item.created_at == earlier for item in response.items))
+
+    def test_non_reservation_special_reason_round_trips_without_fake_participants(self):
+        record_roast_event(
+            self.session,
+            EventCreateRequest(
+                event_type="special",
+                attacker_id="owner",
+                target_id="target",
+                group_id="100",
+                date_str=DATE,
+                special_reason="human",
+            ),
+        )
+        record_roast_event(
+            self.session,
+            EventCreateRequest(
+                event_type="success",
+                attacker_id="owner",
+                target_id="other",
+                group_id="100",
+                date_str=DATE,
+            ),
+        )
+        self.session.commit()
+
+        rows = self.session.scalars(select(RoastEvent).order_by(RoastEvent.id)).all()
+        self.assertEqual(rows[0].participant_snapshot, {"special_reason": "human"})
+        self.assertIsNone(rows[1].participant_snapshot)
+
+        response = list_events(DATE, group_id="100", session=self.session)
+        self.assertEqual([item.special_reason for item in response.items], ["human", ""])
+        self.assertEqual(response.items[0].participant_ids, [])
 
 
 if __name__ == "__main__":

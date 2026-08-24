@@ -72,9 +72,10 @@ def record_roast_event(
             "backfire_victim_id": req.backfire_victim_id,
             "backfire_victim_name": req.backfire_victim_name,
         }
-        # 保持旧预约事件 JSON 的精确形状；只有特殊目标结果才新增该字段。
-        if req.special_reason:
-            participant_snapshot["special_reason"] = req.special_reason
+    if req.special_reason:
+        # 特殊形态也可能来自普通事件；没有预约时只保存原因，不伪造参与者字段。
+        participant_snapshot = participant_snapshot or {}
+        participant_snapshot["special_reason"] = req.special_reason
 
     session.add(
         RoastEvent(

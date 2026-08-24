@@ -25,7 +25,8 @@ class DailyRollLookupResponse(BaseModel):
 
 
 class DailyRollOutcomeSnapshot(BaseModel):
-    snapshot_available: bool = True
+    # 成长结果会先于资源外观写入；调用方必须显式声明快照是否已经完整。
+    snapshot_available: bool
     collection_size_after_roll: int
     resource_version: str = ""
     resolved_variant_level: int = 0
