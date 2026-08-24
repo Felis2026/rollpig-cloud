@@ -23,14 +23,34 @@ def create_event(req: EventCreateRequest, session: Session = Depends(get_session
 
 
 @router.get("", response_model=EventListResponse)
-def list_events(date_str: dt.date, group_id: str | None = None, session: Session = Depends(get_session)):
+def list_events(
+    date_str: dt.date,
+    group_id: str | None = None,
+    session: Session = Depends(get_session),
+    user_id: str | None = None,
+):
     stmt = select(RoastEvent).where(RoastEvent.date_str == date_str)
     if group_id:
         stmt = stmt.where(RoastEvent.group_id == group_id)
+    stmt = stmt.order_by(RoastEvent.created_at.asc(), RoastEvent.id.asc())
     rows = session.execute(stmt).scalars().all()
+    if user_id:
+        normalized_user_id = str(user_id)
+        rows = [
+            row
+            for row in rows
+            if row.attacker_id == normalized_user_id
+            or row.target_id == normalized_user_id
+            or normalized_user_id in {
+                str(item) for item in (row.participant_snapshot or {}).get("ids", [])
+            }
+            or str((row.participant_snapshot or {}).get("backfire_victim_id", "")) == normalized_user_id
+        ]
     return EventListResponse(
         items=[
             EventItem(
+                event_id=str(row.id),
+                created_at=row.created_at,
                 type=row.event_type,
                 attacker=row.attacker_id,
                 target=row.target_id,
@@ -44,6 +64,7 @@ def list_events(date_str: dt.date, group_id: str | None = None, session: Session
                 participant_count=int((row.participant_snapshot or {}).get("count", 0)),
                 backfire_victim_id=(row.participant_snapshot or {}).get("backfire_victim_id", ""),
                 backfire_victim_name=(row.participant_snapshot or {}).get("backfire_victim_name", ""),
+                special_reason=(row.participant_snapshot or {}).get("special_reason", ""),
             )
             for row in rows
         ]

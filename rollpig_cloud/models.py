@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy import BIGINT, JSON, Date, DateTime, Index, Integer, String, UniqueConstraint, func
+from sqlalchemy import BIGINT, JSON, Boolean, Date, DateTime, Index, Integer, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -19,6 +19,12 @@ class DailyRoll(Base):
     date_str: Mapped[dt.date] = mapped_column(Date, nullable=False)
     user_id: Mapped[str] = mapped_column(String(64), nullable=False)
     pig_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    is_new_pig: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    previous_copies: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    copies_after_roll: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    collection_size_after_roll: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    resource_version: Mapped[str | None] = mapped_column(String(192), nullable=True)
+    appearance_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
 

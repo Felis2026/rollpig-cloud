@@ -79,6 +79,21 @@ def ensure_runtime_migrations(
     """执行轻量运行期迁移，并按需回填最近群日活数据。"""
     inspector = inspect(engine)
     table_names = set(inspector.get_table_names())
+    if "daily_rolls" in table_names:
+        daily_roll_columns = {column["name"] for column in inspector.get_columns("daily_rolls")}
+        additions = {
+            "is_new_pig": "BOOLEAN NULL",
+            "previous_copies": "INTEGER NULL",
+            "copies_after_roll": "INTEGER NULL",
+            "collection_size_after_roll": "INTEGER NULL",
+            "resource_version": "VARCHAR(192) NULL",
+            "appearance_snapshot": "JSON NULL",
+        }
+        with engine.begin() as conn:
+            for column_name, column_type in additions.items():
+                if column_name not in daily_roll_columns:
+                    conn.execute(text(_add_column_sql("daily_rolls", column_name, column_type)))
+
     if "user_usage" in table_names:
         existing_columns = {column["name"] for column in inspector.get_columns("user_usage")}
         with engine.begin() as conn:
