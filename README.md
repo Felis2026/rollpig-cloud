@@ -29,6 +29,7 @@
 - **烤群友充能**：为普通烤群友提供服务端次数存储与冷却恢复。
 - **预约烤猪**：处理预约创建、多人加入、首次抽猪激活、跨 Bot 领取与固定结果重试。
 - **烤箱补货**：保存群日活与投票申请，并在单个事务中验票、批量恢复普通烧烤配额。
+- **昨日抽取快照**：冻结每日抽取时的成长结果、资源版本与 EX 外观，供新版“昨日小猪”准确回放。
 - **图鉴快照接口**：为 RollPig Plus 图片版图鉴聚合收藏、近 14 天抽猪与近 7 天被烤数据。
 - **静态资源托管**：通过 `/resources/...` 暴露来自 `rollpig-resources` 的远端资源包。
 - **共享文案托管**：通过 `/resources/rollpig-roasts/...` 提供审核后的只读烤猪文案，不进入数据库。
@@ -46,8 +47,9 @@
 
 | 客户端 | 推荐组合 | 说明 |
 | --- | --- | --- |
-| RollPig Plus `0.11.x` | Cloud `0.4.x` | 支持当前多 Bot 状态同步、预约烤猪及 Cloud 已提供的全部接口。 |
-| RollPig Plus 旧版本 | 现有 Cloud 接口 | 既有接口保持兼容；客户端不使用的新接口不会影响旧玩法。 |
+| 支持新版“昨日小猪”的 RollPig Plus | Cloud `0.5.0+` | 完整保存每日抽取成长、资源版本与 EX 外观快照，并支持按用户查询昨日相关事件。 |
+| RollPig Plus `0.11.x` | Cloud `0.4.x` 或 `0.5.x` | 多 Bot 状态同步、预约烤猪与烤箱补货保持兼容；升级 Cloud 不要求旧客户端同步升级。 |
+| RollPig Plus 旧版本 | Cloud `0.5.x` | 既有请求与响应字段继续保留；客户端不使用的新接口不会影响旧玩法。 |
 | 上游原版 RollPig | 不需要 Cloud | 原版可直接读取静态资源，不使用 Cloud 的 `/v1` 状态接口。 |
 
 Cloud 只保存服务端数据；替换 Cloud 容器或代码不会删除 MySQL 数据，但删除数据库、切换租户 ID 或清理数据库卷都会影响已有成长记录。正式升级前请先备份数据库。
@@ -175,7 +177,8 @@ docker run -d \
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `POST` | `/v1/daily-rolls/get-or-create` | 获取或创建用户某天的今日小猪 |
-| `GET` | `/v1/daily-rolls/by-date` | 按用户与日期查询今日小猪 |
+| `GET` | `/v1/daily-rolls/by-date` | 按用户与日期查询今日小猪及可用的历史结果快照 |
+| `PUT` | `/v1/daily-rolls/snapshot` | 幂等补全客户端实际解析的资源版本与 EX 外观快照 |
 | `GET` | `/v1/daily-rolls/all` | 查询用户全部每日抽猪记录 |
 | `GET` | `/v1/draw-state` | 查询用户抽取状态与重复计数 |
 
@@ -193,7 +196,7 @@ docker run -d \
 | `POST` | `/v1/group-rolls/mark-seen` | 标记群内已见过某只小猪 |
 | `GET` | `/v1/group-rolls` | 查询群内小猪记录 |
 | `POST` | `/v1/events` | 写入抽猪、烤猪等事件 |
-| `GET` | `/v1/events` | 查询事件列表 |
+| `GET` | `/v1/events` | 按日期、群或用户查询有序事件列表 |
 | `GET` | `/v1/groups/active` | 查询有活动记录的群列表 |
 
 ### 冷却、保护与强制次数
@@ -248,7 +251,7 @@ poetry run python tools/backfill_p1a_progress.py
 poetry run python tools/migrate_roast_charges.py
 ```
 
-服务启动时也会执行轻量运行期迁移：自动为旧 `user_usage` 表补齐充能列，并通过 SQLAlchemy `create_all` 新建预约、群日活与烤箱补货相关表；群日活表首次创建时只回填上海业务日期的今天与昨天，避免后续启动重复扫描全部历史记录。本次预约可靠性更新没有 schema migration，但会执行一次幂等、非破坏性的数据状态修复：旧版 `processing + outcome_snapshot` 记录统一冻结为 `sending`，避免升级后把一条可能已经发出的群消息自动重发。
+服务启动时也会执行轻量运行期迁移：自动为旧 `user_usage` 表补齐充能列，并通过 SQLAlchemy `create_all` 新建预约、群日活与烤箱补货相关表；群日活表首次创建时只回填上海业务日期的今天与昨天，避免后续启动重复扫描全部历史记录。Cloud `0.5.0` 会为旧 `daily_rolls` 表幂等增加抽取结果与外观快照列；历史行保持为空，不会使用当前成长状态反向伪造过去的抽取结果。本次预约可靠性更新还会执行一次幂等、非破坏性的数据状态修复：旧版 `processing + outcome_snapshot` 记录统一冻结为 `sending`，避免升级后把一条可能已经发出的群消息自动重发。
 
 预约结果由负责群聊的 Owner Bot 领取。只要本机仍持有未完成预约，就会在已有用户请求之外每 60 秒最多发起一次合并领取请求；该请求同时返回可投递项目和是否仍需继续轮询，没有预约时自动停止。领取后的状态依次为 `processing → prepared → sending → completed`：`processing/prepared` 可在租约过期后重领，`sending` 表示“已经提交外部发送意图、结果可能不确定”，永不自动重领。`prepare`、`sending` 与 `complete` 均允许同一领取凭证幂等重试。
 

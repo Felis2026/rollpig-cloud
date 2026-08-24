@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import datetime as dt
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class DailyRollGetOrCreateRequest(BaseModel):
@@ -20,6 +21,66 @@ class DailyRollLookupResponse(BaseModel):
     copies: int = 0
     previous_duplicate_streak: int = 0
     duplicate_streak: int = 0
+    outcome_snapshot: "DailyRollOutcomeSnapshot | None" = None
+
+
+class DailyRollOutcomeSnapshot(BaseModel):
+    # 成长结果会先于资源外观写入；调用方必须显式声明快照是否已经完整。
+    snapshot_available: bool
+    collection_size_after_roll: int
+    resource_version: str = ""
+    resolved_variant_level: int = 0
+    resolved_image_name: str = ""
+    unlocked_variant_levels: list[int] = Field(default_factory=list)
+    unlocked_variant_fields: list[str] = Field(default_factory=list)
+
+
+class DailyRollSnapshotRequest(BaseModel):
+    user_id: str = Field(min_length=1, max_length=64)
+    date_str: dt.date
+    pig_id: str = Field(min_length=1, max_length=128)
+    resource_version: str = Field(min_length=1, max_length=192)
+    resolved_variant_level: int = Field(default=0, ge=0, le=5)
+    resolved_image_name: str = Field(default="", max_length=192)
+    unlocked_variant_levels: tuple[int, ...] = Field(default=(), max_length=5)
+    unlocked_variant_fields: tuple[Literal["image", "description", "analysis"], ...] = Field(
+        default=(),
+        max_length=3,
+    )
+
+    @field_validator("resolved_image_name")
+    @classmethod
+    def validate_resolved_image_name(cls, value: str) -> str:
+        """图片引用只能是资源包内文件名，不能借补全接口写入路径或 URL。"""
+
+        if not value:
+            return value
+        if value in {".", ".."} or any(character in value for character in ("/", "\\", ":", "\x00")):
+            raise ValueError("resolved_image_name 必须是安全文件名")
+        if any(ord(character) < 32 for character in value):
+            raise ValueError("resolved_image_name 不能包含控制字符")
+        return value
+
+    @field_validator("unlocked_variant_levels")
+    @classmethod
+    def normalize_unlocked_variant_levels(cls, value: tuple[int, ...]) -> tuple[int, ...]:
+        if any(level < 1 or level > 5 for level in value):
+            raise ValueError("unlocked_variant_levels 只能包含 1～5")
+        return tuple(sorted(set(value)))
+
+    @field_validator("unlocked_variant_fields")
+    @classmethod
+    def normalize_unlocked_variant_fields(
+        cls,
+        value: tuple[Literal["image", "description", "analysis"], ...],
+    ) -> tuple[Literal["image", "description", "analysis"], ...]:
+        order = {"image": 0, "description": 1, "analysis": 2}
+        return tuple(sorted(set(value), key=order.__getitem__))
+
+
+class DailyRollSnapshotUpdateResponse(BaseModel):
+    ok: bool = True
+    outcome_snapshot: DailyRollOutcomeSnapshot
 
 
 class PigProgressItem(BaseModel):
@@ -97,9 +158,12 @@ class EventCreateRequest(BaseModel):
     participant_count: int = 0
     backfire_victim_id: str = ""
     backfire_victim_name: str = ""
+    special_reason: str = ""
 
 
 class EventItem(BaseModel):
+    event_id: str = ""
+    created_at: dt.datetime | None = None
     type: str
     attacker: str
     target: str
@@ -113,6 +177,7 @@ class EventItem(BaseModel):
     participant_count: int = 0
     backfire_victim_id: str = ""
     backfire_victim_name: str = ""
+    special_reason: str = ""
 
 
 class EventListResponse(BaseModel):

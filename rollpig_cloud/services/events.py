@@ -63,6 +63,19 @@ def record_roast_event(
             req = bind_reservation_event(reservation, req)
 
     target_date = req.date_str or rollpig_today()
+    participant_snapshot = None
+    if req.reservation_id:
+        participant_snapshot = {
+            "ids": req.participant_ids,
+            "names": req.participant_names,
+            "count": req.participant_count,
+            "backfire_victim_id": req.backfire_victim_id,
+            "backfire_victim_name": req.backfire_victim_name,
+        }
+    if req.special_reason:
+        # 特殊形态也可能来自普通事件；没有预约时只保存原因，不伪造参与者字段。
+        participant_snapshot = participant_snapshot or {}
+        participant_snapshot["special_reason"] = req.special_reason
 
     session.add(
         RoastEvent(
@@ -75,13 +88,7 @@ def record_roast_event(
             target_name=req.target_name,
             food_name=req.food,
             reservation_id=req.reservation_id,
-            participant_snapshot={
-                "ids": req.participant_ids,
-                "names": req.participant_names,
-                "count": req.participant_count,
-                "backfire_victim_id": req.backfire_victim_id,
-                "backfire_victim_name": req.backfire_victim_name,
-            } if req.reservation_id else None,
+            participant_snapshot=participant_snapshot,
         )
     )
     if req.group_id:

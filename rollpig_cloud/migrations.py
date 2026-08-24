@@ -5,6 +5,7 @@ import time
 
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import DBAPIError
 
 from .config import ROLLPIG_TIMEZONE
 
@@ -20,6 +21,51 @@ def _quote_identifier(name: str) -> str:
 
 def _add_column_sql(table_name: str, column_name: str, column_type: str) -> str:
     return f"ALTER TABLE {_quote_identifier(table_name)} ADD COLUMN {_quote_identifier(column_name)} {column_type}"
+
+
+# ================================ 并发安全加列 ================================ #
+
+
+def _column_exists(engine: Engine, table_name: str, column_name: str) -> bool:
+    """重新读取表结构，避免复用并发迁移前的 Inspector 缓存。"""
+
+    return column_name in {
+        column["name"]
+        for column in inspect(engine).get_columns(table_name)
+    }
+
+
+def _is_duplicate_column_error(error: DBAPIError, dialect_name: str) -> bool:
+    """只识别 MySQL 与 SQLite 明确表示“列已存在”的数据库错误。"""
+
+    original = error.orig
+    if dialect_name == "mysql":
+        original_args = getattr(original, "args", ())
+        return bool(original_args) and original_args[0] == 1060
+    if dialect_name == "sqlite":
+        return "duplicate column name" in str(original).casefold()
+    return False
+
+
+def _add_column_if_missing(
+    engine: Engine,
+    table_name: str,
+    column_name: str,
+    column_type: str,
+) -> None:
+    """幂等新增列，并容忍多实例同时执行同一条 ADD COLUMN。"""
+
+    if _column_exists(engine, table_name, column_name):
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(_add_column_sql(table_name, column_name, column_type)))
+    except DBAPIError as error:
+        if not _is_duplicate_column_error(error, engine.dialect.name):
+            raise
+        # 只在竞争实例确实已经完成加列时吞掉重复列错误，其他异常继续暴露。
+        if not _column_exists(engine, table_name, column_name):
+            raise
 
 
 def _migrate_existing_user_usage(engine: Engine) -> None:
@@ -79,22 +125,33 @@ def ensure_runtime_migrations(
     """执行轻量运行期迁移，并按需回填最近群日活数据。"""
     inspector = inspect(engine)
     table_names = set(inspector.get_table_names())
+    if "daily_rolls" in table_names:
+        additions = {
+            "is_new_pig": "BOOLEAN NULL",
+            "previous_copies": "INTEGER NULL",
+            "copies_after_roll": "INTEGER NULL",
+            "collection_size_after_roll": "INTEGER NULL",
+            "previous_duplicate_streak": "INTEGER NULL",
+            "duplicate_streak_after_roll": "INTEGER NULL",
+            "resource_version": "VARCHAR(192) NULL",
+            "appearance_snapshot": "JSON NULL",
+        }
+        for column_name, column_type in additions.items():
+            _add_column_if_missing(engine, "daily_rolls", column_name, column_type)
+
     if "user_usage" in table_names:
-        existing_columns = {column["name"] for column in inspector.get_columns("user_usage")}
-        with engine.begin() as conn:
-            if "roast_charges" not in existing_columns:
-                conn.execute(text(_add_column_sql("user_usage", "roast_charges", "INTEGER NULL")))
-            if "roast_charge_updated_ts" not in existing_columns:
-                conn.execute(text(_add_column_sql("user_usage", "roast_charge_updated_ts", "BIGINT NULL")))
+        _add_column_if_missing(engine, "user_usage", "roast_charges", "INTEGER NULL")
+        _add_column_if_missing(engine, "user_usage", "roast_charge_updated_ts", "BIGINT NULL")
         _migrate_existing_user_usage(engine)
 
     if "roast_events" in table_names:
-        event_columns = {column["name"] for column in inspect(engine).get_columns("roast_events")}
-        with engine.begin() as conn:
-            if "reservation_id" not in event_columns:
-                conn.execute(text(_add_column_sql("roast_events", "reservation_id", "VARCHAR(64) NOT NULL DEFAULT ''")))
-            if "participant_snapshot" not in event_columns:
-                conn.execute(text(_add_column_sql("roast_events", "participant_snapshot", "JSON NULL")))
+        _add_column_if_missing(
+            engine,
+            "roast_events",
+            "reservation_id",
+            "VARCHAR(64) NOT NULL DEFAULT ''",
+        )
+        _add_column_if_missing(engine, "roast_events", "participant_snapshot", "JSON NULL")
 
     if "roast_reservations" in table_names:
         _migrate_ambiguous_roast_reservations(engine)
