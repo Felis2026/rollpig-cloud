@@ -7,16 +7,22 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..auth import verify_token
+from ..config import ApiKeyIdentity
 from ..db import get_session
 from ..models import GroupRoll
 from ..schemas import GroupRollItem, GroupRollListResponse, GroupRollMarkSeenRequest
 from ..services.roast_refills import mark_group_active_users
+from ..services.key_usage import record_key_mutation_outcome
 
 router = APIRouter(prefix="/v1/group-rolls", tags=["group-rolls"], dependencies=[Depends(verify_token)])
 
 
 @router.post("/mark-seen")
-def mark_seen(req: GroupRollMarkSeenRequest, session: Session = Depends(get_session)):
+def mark_seen(
+    req: GroupRollMarkSeenRequest,
+    session: Session = Depends(get_session),
+    identity: ApiKeyIdentity = Depends(verify_token),
+):
     existing = session.execute(
         select(GroupRoll).where(
             GroupRoll.group_id == req.group_id,
@@ -24,6 +30,8 @@ def mark_seen(req: GroupRollMarkSeenRequest, session: Session = Depends(get_sess
             GroupRoll.date_str == req.date_str,
         )
     ).scalar_one_or_none()
+    created = existing is None
+    changed = existing is not None and existing.pig_id != req.pig_id
     if existing:
         existing.pig_id = req.pig_id
     else:
@@ -33,6 +41,14 @@ def mark_seen(req: GroupRollMarkSeenRequest, session: Session = Depends(get_sess
         date_str=req.date_str,
         group_id=req.group_id,
         user_ids=[req.user_id],
+    )
+    record_key_mutation_outcome(
+        session,
+        identity,
+        operation="POST /v1/group-rolls/mark-seen",
+        created_records=int(created),
+        updated_records=int(changed),
+        idempotent_hits=int(not created and not changed),
     )
     session.commit()
     return {"ok": True}

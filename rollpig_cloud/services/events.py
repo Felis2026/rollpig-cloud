@@ -39,7 +39,19 @@ def record_roast_event(
     *,
     reservation: RoastReservationItem | None = None,
 ) -> bool:
-    """写入烧烤事件；预约事件按 reservation_id 幂等，并同步登记群日活。"""
+    """兼容现有调用方，只返回事件是否已成功存在。"""
+
+    recorded, _created = record_roast_event_with_status(session, req, reservation=reservation)
+    return recorded
+
+
+def record_roast_event_with_status(
+    session: Session,
+    req: EventCreateRequest,
+    *,
+    reservation: RoastReservationItem | None = None,
+) -> tuple[bool, bool]:
+    """写入烧烤事件，并区分首次创建与预约事件的幂等命中。"""
 
     if req.reservation_id:
         if reservation is None:
@@ -58,7 +70,7 @@ def record_roast_event(
             select(RoastEvent.id).where(RoastEvent.reservation_id == req.reservation_id).limit(1)
         ).first()
         if existing is not None:
-            return True
+            return True, False
         if reservation is not None:
             req = bind_reservation_event(reservation, req)
 
@@ -101,4 +113,4 @@ def record_roast_event(
             group_id=req.group_id,
             user_ids=active_user_ids,
         )
-    return True
+    return True, True

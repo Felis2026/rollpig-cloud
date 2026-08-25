@@ -7,17 +7,30 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..auth import verify_token
+from ..config import ApiKeyIdentity
 from ..db import get_session
 from ..models import RoastEvent
 from ..schemas import EventCreateRequest, EventItem, EventListResponse
-from ..services.events import record_roast_event
+from ..services.events import record_roast_event_with_status
+from ..services.key_usage import record_key_mutation_outcome
 
 router = APIRouter(prefix="/v1/events", tags=["events"], dependencies=[Depends(verify_token)])
 
 
 @router.post("")
-def create_event(req: EventCreateRequest, session: Session = Depends(get_session)):
-    record_roast_event(session, req)
+def create_event(
+    req: EventCreateRequest,
+    session: Session = Depends(get_session),
+    identity: ApiKeyIdentity = Depends(verify_token),
+):
+    _recorded, created = record_roast_event_with_status(session, req)
+    record_key_mutation_outcome(
+        session,
+        identity,
+        operation="POST /v1/events",
+        created_records=int(created),
+        idempotent_hits=int(not created),
+    )
     session.commit()
     return {"ok": True}
 

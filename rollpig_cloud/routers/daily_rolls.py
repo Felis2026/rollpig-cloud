@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..auth import verify_token
+from ..config import ApiKeyIdentity
 from ..db import get_session
 from ..models import DailyRoll, GroupRoll
 from ..schemas import (
@@ -20,6 +21,7 @@ from ..schemas import (
     DailyRollSnapshotUpdateResponse,
 )
 from ..services.progress import apply_created_roll_progress, build_lookup_response
+from ..services.key_usage import record_key_mutation_outcome
 from ..services.reservations import activate_target_reservations
 from ..services.roast_refills import mark_group_active_users
 
@@ -68,12 +70,22 @@ def _reconcile_reservations_after_commit(
 
 
 @router.post("/get-or-create", response_model=DailyRollLookupResponse)
-def get_or_create_daily_roll(req: DailyRollGetOrCreateRequest, session: Session = Depends(get_session)):
+def get_or_create_daily_roll(
+    req: DailyRollGetOrCreateRequest,
+    session: Session = Depends(get_session),
+    identity: ApiKeyIdentity = Depends(verify_token),
+):
     existing = session.execute(
         select(DailyRoll).where(DailyRoll.user_id == req.user_id, DailyRoll.date_str == req.date_str)
     ).scalar_one_or_none()
     if existing:
         _ensure_group_roll(session, req.group_id, req.user_id, existing.pig_id, req.date_str)
+        record_key_mutation_outcome(
+            session,
+            identity,
+            operation="POST /v1/daily-rolls/get-or-create",
+            idempotent_hits=1,
+        )
         session.commit()
         _reconcile_reservations_after_commit(
             session,
@@ -102,6 +114,12 @@ def get_or_create_daily_roll(req: DailyRollGetOrCreateRequest, session: Session 
             target_id=req.user_id,
             target_pig_id=req.proposed_pig_id,
         )
+        record_key_mutation_outcome(
+            session,
+            identity,
+            operation="POST /v1/daily-rolls/get-or-create",
+            created_records=1,
+        )
         session.commit()
         _reconcile_reservations_after_commit(
             session,
@@ -116,6 +134,12 @@ def get_or_create_daily_roll(req: DailyRollGetOrCreateRequest, session: Session 
             select(DailyRoll).where(DailyRoll.user_id == req.user_id, DailyRoll.date_str == req.date_str)
         ).scalar_one()
         _ensure_group_roll(session, req.group_id, req.user_id, existing.pig_id, req.date_str)
+        record_key_mutation_outcome(
+            session,
+            identity,
+            operation="POST /v1/daily-rolls/get-or-create",
+            idempotent_hits=1,
+        )
         session.commit()
         _reconcile_reservations_after_commit(
             session,
@@ -151,7 +175,11 @@ def _snapshot_payload(req: DailyRollSnapshotRequest) -> dict:
 
 
 @router.put("/snapshot", response_model=DailyRollSnapshotUpdateResponse)
-def complete_daily_roll_snapshot(req: DailyRollSnapshotRequest, session: Session = Depends(get_session)):
+def complete_daily_roll_snapshot(
+    req: DailyRollSnapshotRequest,
+    session: Session = Depends(get_session),
+    identity: ApiKeyIdentity = Depends(verify_token),
+):
     """幂等保存抽取客户端当时实际解析出的资源与 EX 差分结果。"""
 
     existing = session.execute(
@@ -184,9 +212,22 @@ def complete_daily_roll_snapshot(req: DailyRollSnapshotRequest, session: Session
         stored_payload = existing.appearance_snapshot if isinstance(existing.appearance_snapshot, dict) else {}
         if str(existing.resource_version or "") != req.resource_version or stored_payload != payload:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="每日抽取快照已由首次客户端写入")
+        record_key_mutation_outcome(
+            session,
+            identity,
+            operation="PUT /v1/daily-rolls/snapshot",
+            idempotent_hits=1,
+        )
+        session.commit()
     else:
         existing.resource_version = req.resource_version
         existing.appearance_snapshot = payload
+        record_key_mutation_outcome(
+            session,
+            identity,
+            operation="PUT /v1/daily-rolls/snapshot",
+            updated_records=1,
+        )
         session.commit()
 
     return DailyRollSnapshotUpdateResponse(
