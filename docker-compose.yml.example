@@ -16,7 +16,7 @@ services:
       - "127.0.0.1:18082:8011"
     environment:
       ROLLPIG_CLOUD_DATABASE_URL: "mysql+pymysql://user:password@mysql:3306/rollpig_cloud?charset=utf8mb4"
-      ROLLPIG_CLOUD_TOKENS: "replace-with-token"
+      ROLLPIG_CLOUD_KEYS_JSON: '{"nekobot-v2":"replace-with-token","shenyang-v1":"replace-with-another-token"}'
       ROLLPIG_CLOUD_DEFAULT_TENANT_ID: "felis-main"
       ROLLPIG_CLOUD_HOST: "0.0.0.0"
       ROLLPIG_CLOUD_PORT: "8011"

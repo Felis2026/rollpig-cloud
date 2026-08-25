@@ -40,6 +40,7 @@ from rollpig_cloud.routers.roast_reservations import (
 )
 from rollpig_cloud.routers.cooldowns import consume_force, consume_roast
 from rollpig_cloud.routers.events import create_event, list_events
+from rollpig_cloud.services.events import record_roast_event_with_status
 from rollpig_cloud.services.reservations import activate_target_reservations, prepare_reservation
 
 
@@ -820,6 +821,22 @@ class CloudRoastReservationTests(unittest.TestCase):
 
         events = self.session.scalars(select(RoastEvent)).all()
         self.assertEqual([event.date_str for event in events], [dt.date(2026, 8, 9)])
+
+    def test_event_status_distinguishes_creation_from_idempotent_retry(self):
+        request = EventCreateRequest(
+            event_type="escape",
+            attacker_id="a",
+            target_id="target",
+            reservation_id="reservation-idempotent",
+            date_str=dt.date(2026, 8, 9),
+        )
+
+        first = record_roast_event_with_status(self.session, request)
+        self.session.commit()
+        second = record_roast_event_with_status(self.session, request)
+
+        self.assertEqual(first, (True, True))
+        self.assertEqual(second, (True, False))
 
 
 if __name__ == "__main__":

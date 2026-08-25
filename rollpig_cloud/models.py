@@ -100,6 +100,40 @@ class UserUsage(Base):
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
 
 
+# ================================ 接入 Key 使用统计 ================================ #
+# 统计只保存不可逆 Token 指纹与人工名称。业务数据仍为跨 Bot 共享状态，不能把
+# “最后调用它的 Key”误写成数据所有者，因此这里按请求操作独立累计。
+class SourceKeyIdentity(Base):
+    __tablename__ = "source_key_identities"
+
+    key_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    key_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    first_seen_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    last_seen_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class SourceKeyDailyUsage(Base):
+    __tablename__ = "source_key_daily_usage"
+    __table_args__ = (
+        UniqueConstraint("date_str", "source_key_id", "operation", name="uq_source_key_daily_operation"),
+        Index("ix_source_key_daily_date", "date_str"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    date_str: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    source_key_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    operation: Mapped[str] = mapped_column(String(192), nullable=False)
+    authenticated_requests: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    successful_requests: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    successful_mutations: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failed_requests: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_records: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_records: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    deleted_records: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    idempotent_hits: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+
 class RoastEvent(Base):
     __tablename__ = "roast_events"
     __table_args__ = (Index("ix_roast_events_date_group", "date_str", "group_id"),)

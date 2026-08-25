@@ -59,6 +59,7 @@ Cloud 只保存服务端数据；替换 Cloud 容器或代码不会删除 MySQL 
 | 变量名 | 默认值 | 说明 |
 | --- | --- | --- |
 | `ROLLPIG_CLOUD_DATABASE_URL` | `mysql+pymysql://root:password@127.0.0.1:3306/rollpig_cloud?charset=utf8mb4` | MySQL 连接串 |
+| `ROLLPIG_CLOUD_KEYS_JSON` | 空 | 具名 Bearer Key，使用 `{名称: Token}` JSON；名称会进入访问日志和用量统计，Token 不会被记录 |
 | `ROLLPIG_CLOUD_TOKENS` | 空 | Bearer Token 列表，多个 Token 用英文逗号分隔；未配置时 `/v1` 接口会拒绝服务 |
 | `ROLLPIG_CLOUD_HOST` | `0.0.0.0` | Uvicorn 监听地址 |
 | `ROLLPIG_CLOUD_PORT` | `8011` | Uvicorn 监听端口 |
@@ -67,7 +68,40 @@ Cloud 只保存服务端数据；替换 Cloud 容器或代码不会删除 MySQL 
 所有 `/v1/...` API 都需要请求头：
 
 ```http
-Authorization: Bearer <ROLLPIG_CLOUD_TOKENS 中的某个 Token>
+Authorization: Bearer <已配置的 Token>
+```
+
+推荐为每个接入实例配置独立名称：
+
+```env
+ROLLPIG_CLOUD_KEYS_JSON={"nekobot-v2":"实际Token1","shenyang-v1":"实际Token2"}
+```
+
+Key 名称可以修改；Cloud 使用 Token 的不可逆指纹关联统计，更名不会拆分历史数据。旧的
+`ROLLPIG_CLOUD_TOKENS` 继续兼容，未命名 Token 会以 `key-xxxxxxxxxxxxxxxx` 显示。两个变量可以同时使用，
+同一个 Token 出现在两处时优先采用具名配置。
+
+Cloud 会把已鉴权请求按上海业务日期、Key 和路由累计到 `source_key_daily_usage`。其中
+`successful_mutations` 表示成功的 `POST`、`PUT`、`PATCH`、`DELETE` 请求数，不等同于接口一次批量写入的数据库行数；
+每日抽取、外观快照、烤猪事件、群抽取记录和保护名单接口还会分别累计真实的新增、更新、删除与幂等命中数量。
+统计从启用该版本后开始，无法反推历史 Token 来源。日志只包含 Key 指纹和名称，不包含原始 Token、用户 ID 或查询参数。
+
+按 Key 汇总写入结果可以执行：
+
+```sql
+SELECT
+    key_info.key_name,
+    usage.operation,
+    SUM(usage.successful_mutations) AS successful_mutations,
+    SUM(usage.created_records) AS created_records,
+    SUM(usage.updated_records) AS updated_records,
+    SUM(usage.deleted_records) AS deleted_records,
+    SUM(usage.idempotent_hits) AS idempotent_hits
+FROM source_key_daily_usage AS usage
+JOIN source_key_identities AS key_info
+  ON key_info.key_id = usage.source_key_id
+GROUP BY key_info.key_id, key_info.key_name, usage.operation
+ORDER BY key_info.key_name, usage.operation;
 ```
 
 `GET /healthz` 不需要鉴权，方便反代或容器健康检查。
@@ -89,7 +123,7 @@ cp docker-compose.yml.example docker-compose.yml
 ```yaml
 environment:
   ROLLPIG_CLOUD_DATABASE_URL: "mysql+pymysql://user:password@mysql:3306/rollpig_cloud?charset=utf8mb4"
-  ROLLPIG_CLOUD_TOKENS: "replace-with-token"
+  ROLLPIG_CLOUD_KEYS_JSON: '{"nekobot-v2":"replace-with-token"}'
   ROLLPIG_CLOUD_DEFAULT_TENANT_ID: "felis-main"
 ```
 
