@@ -41,10 +41,19 @@ def list_events(
     group_id: str | None = None,
     session: Session = Depends(get_session),
     user_id: str | None = None,
+    cutoff_at: dt.datetime | None = None,
 ):
     stmt = select(RoastEvent).where(RoastEvent.date_str == date_str)
     if group_id:
         stmt = stmt.where(RoastEvent.group_id == group_id)
+    if cutoff_at is not None:
+        # 数据库存储 UTC naive 时间；API 允许客户端提交带时区的固定日报截止点。
+        normalized_cutoff = (
+            cutoff_at.astimezone(dt.timezone.utc).replace(tzinfo=None)
+            if cutoff_at.tzinfo is not None
+            else cutoff_at
+        )
+        stmt = stmt.where(RoastEvent.created_at <= normalized_cutoff)
     stmt = stmt.order_by(RoastEvent.created_at.asc(), RoastEvent.id.asc())
     rows = session.execute(stmt).scalars().all()
     if user_id:

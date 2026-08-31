@@ -55,8 +55,22 @@ def mark_seen(
 
 
 @router.get("", response_model=GroupRollListResponse)
-def get_group_rolls(group_id: str, date_str: dt.date, session: Session = Depends(get_session)):
-    rows = session.execute(
-        select(GroupRoll).where(GroupRoll.group_id == group_id, GroupRoll.date_str == date_str)
-    ).scalars().all()
+def get_group_rolls(
+    group_id: str,
+    date_str: dt.date,
+    session: Session = Depends(get_session),
+    cutoff_at: dt.datetime | None = None,
+):
+    stmt = select(GroupRoll).where(
+        GroupRoll.group_id == group_id,
+        GroupRoll.date_str == date_str,
+    )
+    if cutoff_at is not None:
+        normalized_cutoff = (
+            cutoff_at.astimezone(dt.timezone.utc).replace(tzinfo=None)
+            if cutoff_at.tzinfo is not None
+            else cutoff_at
+        )
+        stmt = stmt.where(GroupRoll.seen_at <= normalized_cutoff)
+    rows = session.execute(stmt).scalars().all()
     return GroupRollListResponse(items=[GroupRollItem(user_id=row.user_id, pig_id=row.pig_id) for row in rows])

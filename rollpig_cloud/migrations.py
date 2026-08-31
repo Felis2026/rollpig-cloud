@@ -156,6 +156,22 @@ def ensure_runtime_migrations(
     if "roast_reservations" in table_names:
         _migrate_ambiguous_roast_reservations(engine)
 
+    if "daily_report_deliveries" in table_names:
+        # 领取次数与下次可领取时间是安全重试的持久化依据；已有记录从零次开始，
+        # 不能因为升级迁移被误判为已经耗尽重试额度。
+        _add_column_if_missing(
+            engine,
+            "daily_report_deliveries",
+            "attempt_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        _add_column_if_missing(
+            engine,
+            "daily_report_deliveries",
+            "next_attempt_at",
+            "DATETIME NULL",
+        )
+
     # 新增群日活表时只回填上海业务日期的今天与昨天：既覆盖跨日部署，
     # 又避免 Cloud 每次启动扫描全部历史记录。调用方负责仅在首次建表时开启回填。
     table_names = set(inspect(engine).get_table_names())

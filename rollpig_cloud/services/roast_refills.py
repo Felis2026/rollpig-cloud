@@ -145,15 +145,24 @@ def mark_group_active_users(
             continue
 
 
-def get_group_active_user_ids(session: Session, date_str: dt.date, group_id: str) -> list[str]:
-    return sorted(
-        session.execute(
-            select(GroupDailyActiveUser.user_id).where(
-                GroupDailyActiveUser.date_str == date_str,
-                GroupDailyActiveUser.group_id == str(group_id),
-            )
-        ).scalars()
+def get_group_active_user_ids(
+    session: Session,
+    date_str: dt.date,
+    group_id: str,
+    cutoff_at: dt.datetime | None = None,
+) -> list[str]:
+    stmt = select(GroupDailyActiveUser.user_id).where(
+        GroupDailyActiveUser.date_str == date_str,
+        GroupDailyActiveUser.group_id == str(group_id),
     )
+    if cutoff_at is not None:
+        normalized_cutoff = (
+            cutoff_at.astimezone(dt.timezone.utc).replace(tzinfo=None)
+            if cutoff_at.tzinfo is not None
+            else cutoff_at
+        )
+        stmt = stmt.where(GroupDailyActiveUser.active_at <= normalized_cutoff)
+    return sorted(session.execute(stmt).scalars())
 
 
 def _reset_roast_charges(
