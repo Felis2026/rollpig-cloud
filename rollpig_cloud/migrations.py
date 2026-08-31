@@ -125,20 +125,24 @@ def _group_activity_source_queries(table_names: set[str]) -> list[str]:
     if "group_rolls" in table_names:
         sources.append(
             "SELECT date_str, group_id, user_id, seen_at AS active_at "
-            "FROM group_rolls WHERE group_id <> '' AND user_id <> ''"
+            "FROM group_rolls WHERE group_id <> '' AND user_id <> '' "
+            "AND date_str BETWEEN :activity_start AND :activity_end"
         )
     if "roast_events" in table_names:
         sources.extend((
             "SELECT date_str, group_id, attacker_id AS user_id, created_at AS active_at "
-            "FROM roast_events WHERE group_id <> '' AND attacker_id <> ''",
+            "FROM roast_events WHERE group_id <> '' AND attacker_id <> '' "
+            "AND date_str BETWEEN :activity_start AND :activity_end",
             "SELECT date_str, group_id, target_id AS user_id, created_at AS active_at "
-            "FROM roast_events WHERE group_id <> '' AND target_id <> '' AND event_type <> 'bot_backfire'",
+            "FROM roast_events WHERE group_id <> '' AND target_id <> '' AND event_type <> 'bot_backfire' "
+            "AND date_str BETWEEN :activity_start AND :activity_end",
         ))
     if "roast_reservations" in table_names:
         # 正常数据中主厨也会出现在参与者表；单列 owner 可兼容早期不完整记录。
         sources.append(
             "SELECT date_str, group_id, owner_id AS user_id, created_at AS active_at "
-            "FROM roast_reservations WHERE group_id <> '' AND owner_id <> ''"
+            "FROM roast_reservations WHERE group_id <> '' AND owner_id <> '' "
+            "AND date_str BETWEEN :activity_start AND :activity_end"
         )
     if {"roast_reservations", "roast_reservation_participants"}.issubset(table_names):
         sources.append(
@@ -147,7 +151,8 @@ def _group_activity_source_queries(table_names: set[str]) -> list[str]:
             "FROM roast_reservations AS reservation "
             "JOIN roast_reservation_participants AS participant "
             "ON participant.reservation_id = reservation.reservation_id "
-            "WHERE reservation.group_id <> '' AND participant.user_id <> ''"
+            "WHERE reservation.group_id <> '' AND participant.user_id <> '' "
+            "AND reservation.date_str BETWEEN :activity_start AND :activity_end"
         )
     return sources
 
@@ -167,7 +172,6 @@ def _backfill_group_activity(
     aggregated_source = (
         "SELECT source.date_str, source.group_id, source.user_id, MIN(source.active_at) AS active_at "
         f"FROM ({' UNION ALL '.join(sources)}) AS source "
-        "WHERE source.date_str BETWEEN :activity_start AND :activity_end "
         "GROUP BY source.date_str, source.group_id, source.user_id"
     )
     dialect_name = engine.dialect.name

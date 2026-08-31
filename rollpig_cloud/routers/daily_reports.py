@@ -4,7 +4,7 @@ import datetime as dt
 import uuid
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -79,6 +79,20 @@ def _clear_claim(row: DailyReportDelivery) -> None:
     row.claimed_at = None
     row.instance_id = ""
     row.delivery_bot_id = ""
+
+
+def _claim_item(row: DailyReportDelivery) -> DailyReportClaimItem:
+    """从已持久化的租约生成响应，确保新领取与令牌恢复返回同一口径。"""
+
+    return DailyReportClaimItem(
+        date_str=row.date_str,
+        group_id=row.group_id,
+        delivery_bot_id=row.delivery_bot_id,
+        cutoff_at=row.cutoff_at,
+        claim_token=str(row.claim_token or ""),
+        status=row.status,
+        attempt_count=row.attempt_count,
+    )
 
 
 def _user_id_batches(user_ids: tuple[str, ...], size: int = 500) -> tuple[tuple[str, ...], ...]:
@@ -282,7 +296,9 @@ def _claim_once(
         .with_for_update()
     ).scalars().all()
 
-    # ================================ 租约领取 ================================ #
+    # ================================ 租约恢复与原子领取 ================================ #
+    # MySQL 先使用行锁降低竞争；SQLite 会忽略 SELECT FOR UPDATE，因此最终仍以
+    # 带旧状态条件的单条 UPDATE 作为跨后端唯一领取依据。
     # sending 之后外部消息结果可能已不可确认，只有到期 pending 或过期 claimed 能重领。
     claimed: list[DailyReportClaimItem] = []
     stale_before = now - DAILY_REPORT_CLAIM_TIMEOUT
@@ -305,28 +321,18 @@ def _claim_once(
         )
         if same_owner_claim:
             # HTTP 响应可能在 Cloud 已提交后丢失；同一投递者可取回原租约，不能再等五分钟。
-            claimed.append(
-                DailyReportClaimItem(
-                    date_str=row.date_str,
-                    group_id=row.group_id,
-                    delivery_bot_id=row.delivery_bot_id,
-                    cutoff_at=row.cutoff_at,
-                    claim_token=row.claim_token,
-                    status=row.status,
-                    attempt_count=row.attempt_count,
-                )
-            )
+            claimed.append(_claim_item(row))
             continue
         pending_due = (
             row.status == "pending"
             and now >= row.cutoff_at
             and (row.next_attempt_at is None or row.next_attempt_at <= now)
         )
-        reclaimable = pending_due or (
+        stale_claim = (
             row.status == "claimed"
             and (row.claimed_at is None or row.claimed_at < stale_before)
         )
-        if not reclaimable:
+        if not pending_due and not stale_claim:
             continue
         if row.attempt_count >= DAILY_REPORT_MAX_ATTEMPTS:
             row.status = "failed"
@@ -334,24 +340,48 @@ def _claim_once(
             row.last_error = row.last_error or "retry_attempts_exhausted"
             _clear_claim(row)
             continue
-        row.status = "claimed"
-        row.instance_id = str(req.instance_id)[:64]
-        row.delivery_bot_id = current_bot_id
-        row.claim_token = uuid.uuid4().hex
-        row.claimed_at = now
-        row.attempt_count += 1
-        row.next_attempt_at = None
-        claimed.append(
-            DailyReportClaimItem(
-                date_str=row.date_str,
-                group_id=row.group_id,
-                delivery_bot_id=row.delivery_bot_id,
-                cutoff_at=row.cutoff_at,
-                claim_token=row.claim_token,
-                status=row.status,
-                attempt_count=row.attempt_count,
+        previous_attempt_count = row.attempt_count
+        claim_token = uuid.uuid4().hex
+        result = session.execute(
+            update(DailyReportDelivery)
+            .where(
+                DailyReportDelivery.id == row.id,
+                DailyReportDelivery.attempt_count == previous_attempt_count,
+                or_(
+                    and_(
+                        DailyReportDelivery.status == "pending",
+                        DailyReportDelivery.cutoff_at <= now,
+                        or_(
+                            DailyReportDelivery.next_attempt_at.is_(None),
+                            DailyReportDelivery.next_attempt_at <= now,
+                        ),
+                    ),
+                    and_(
+                        DailyReportDelivery.status == "claimed",
+                        or_(
+                            DailyReportDelivery.claimed_at.is_(None),
+                            DailyReportDelivery.claimed_at < stale_before,
+                        ),
+                    ),
+                ),
             )
+            .values(
+                status="claimed",
+                instance_id=str(req.instance_id)[:64],
+                delivery_bot_id=current_bot_id,
+                claim_token=claim_token,
+                claimed_at=now,
+                attempt_count=previous_attempt_count + 1,
+                next_attempt_at=None,
+            )
+            .execution_options(synchronize_session=False)
         )
+        # 另一个 SQLite/MySQL 事务若已先改写状态，条件更新会返回零行；刷新后只报告赢家租约。
+        session.expire(row)
+        session.refresh(row)
+        if result.rowcount != 1:
+            continue
+        claimed.append(_claim_item(row))
     next_claim_at = _next_claim_at(
         rows,
         {item.claim_token for item in claimed},

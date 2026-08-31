@@ -14,8 +14,10 @@ from sqlalchemy.orm import Session
 
 os.environ.setdefault("ROLLPIG_CLOUD_DATABASE_URL", "sqlite+pysqlite:///:memory:")
 
-from rollpig_cloud.config import ApiKeyIdentity
+from rollpig_cloud import db as cloud_db
+from rollpig_cloud.config import ApiKeyIdentity, ROLLPIG_TIMEZONE
 from rollpig_cloud.db import Base
+from rollpig_cloud.db import _engine_connect_args
 from rollpig_cloud.migrations import ensure_runtime_migrations
 from rollpig_cloud.models import (
     Collection,
@@ -172,6 +174,49 @@ class DailyReportDeliveryTests(unittest.TestCase):
 
         self.assertEqual(sorted(results), [0, 1])
         self.assertEqual(len(rows), 1)
+
+    def test_concurrent_claims_of_existing_pending_row_have_one_winner(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "existing-daily-report.sqlite3"
+            engine = create_engine(
+                f"sqlite+pysqlite:///{database_path.as_posix()}",
+                future=True,
+                connect_args={"check_same_thread": False, "timeout": 10},
+            )
+            Base.metadata.create_all(engine)
+            with Session(engine) as session:
+                session.add(
+                    DailyReportDelivery(
+                        date_str=DATE,
+                        group_id="100",
+                        cutoff_at=dt.datetime(2026, 8, 30, 15, 45),
+                    )
+                )
+                session.commit()
+            barrier = Barrier(2)
+
+            def run_claim(instance_id: str) -> str:
+                with Session(engine, expire_on_commit=False) as session:
+                    barrier.wait(timeout=5)
+                    response = claim_daily_reports(_claim_request(instance_id), session)
+                    return response.items[0].claim_token if response.items else ""
+
+            with (
+                patch("rollpig_cloud.routers.daily_reports._utc_now", return_value=self.now),
+                ThreadPoolExecutor(max_workers=2) as executor,
+            ):
+                tokens = list(executor.map(run_claim, ("instance-a", "instance-b")))
+
+            with Session(engine) as session:
+                row = session.scalar(select(DailyReportDelivery))
+                stored_token = row.claim_token
+                attempt_count = row.attempt_count
+            engine.dispose()
+
+        winning_tokens = [token for token in tokens if token]
+        self.assertEqual(len(winning_tokens), 1)
+        self.assertEqual(winning_tokens[0], stored_token)
+        self.assertEqual(attempt_count, 1)
 
     def test_expired_claim_lease_can_be_reclaimed(self) -> None:
         first = self._claim("instance-a").items[0]
@@ -366,6 +411,13 @@ class DailyReportProfileTests(unittest.TestCase):
 
 
 class DailyReportMigrationTests(unittest.TestCase):
+    def test_mysql_connections_initialize_utc_session(self) -> None:
+        self.assertEqual(
+            _engine_connect_args("mysql+pymysql://user:pass@example.com/rollpig"),
+            {"init_command": "SET time_zone = '+00:00'"},
+        )
+        self.assertEqual(_engine_connect_args("sqlite+pysqlite:///:memory:"), {})
+
     def test_runtime_migration_adds_retry_columns_idempotently(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             database_path = Path(temp_dir) / "legacy-daily-reports.sqlite3"
@@ -482,6 +534,42 @@ class DailyReportMigrationTests(unittest.TestCase):
         self.assertEqual(rows["target"], earliest)
         self.assertEqual(rows["owner"], dt.datetime(2026, 8, 30, 15, 41))
         self.assertEqual(rows["participant"], dt.datetime(2026, 8, 30, 15, 42))
+
+    def test_init_db_repairs_activity_when_table_already_exists(self) -> None:
+        engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+        Base.metadata.create_all(engine)
+        business_date = dt.datetime.now(ROLLPIG_TIMEZONE).date()
+        source_time = dt.datetime.combine(business_date, dt.time(14, 0))
+        with Session(engine) as session:
+            session.add_all([
+                GroupRoll(
+                    date_str=business_date,
+                    group_id="100",
+                    user_id="existing",
+                    pig_id="pig-a",
+                    seen_at=source_time,
+                ),
+                GroupDailyActiveUser(
+                    date_str=business_date,
+                    group_id="100",
+                    user_id="existing",
+                    active_at=source_time + dt.timedelta(hours=2),
+                ),
+            ])
+            session.commit()
+
+        with patch.object(cloud_db, "engine", engine):
+            cloud_db.init_db()
+
+        with Session(engine) as session:
+            active_at = session.scalar(
+                select(GroupDailyActiveUser.active_at).where(
+                    GroupDailyActiveUser.user_id == "existing"
+                )
+            )
+        engine.dispose()
+
+        self.assertEqual(active_at, source_time)
 
     def test_delivery_identifiers_reject_values_longer_than_database_columns(self) -> None:
         with self.assertRaises(ValueError):
