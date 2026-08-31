@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 os.environ.setdefault("ROLLPIG_CLOUD_DATABASE_URL", "sqlite+pysqlite:///:memory:")
 
+from rollpig_cloud.config import ApiKeyIdentity
 from rollpig_cloud.db import Base
 from rollpig_cloud.migrations import ensure_runtime_migrations
 from rollpig_cloud.models import (
@@ -23,6 +24,8 @@ from rollpig_cloud.models import (
     GroupDailyActiveUser,
     GroupRoll,
     RoastEvent,
+    RoastReservation,
+    RoastReservationParticipant,
 )
 from rollpig_cloud.routers.daily_reports import (
     DAILY_REPORT_CLAIM_TIMEOUT,
@@ -32,13 +35,15 @@ from rollpig_cloud.routers.daily_reports import (
     transition_daily_report,
 )
 from rollpig_cloud.routers.events import list_events
-from rollpig_cloud.routers.group_rolls import get_group_rolls
+from rollpig_cloud.routers.group_rolls import get_group_rolls, mark_seen
+from rollpig_cloud.routers.daily_rolls import _ensure_group_roll
 from rollpig_cloud.routers.roast_refills import list_active_users
 from rollpig_cloud.schemas import (
     DailyReportClaimRequest,
     DailyReportDeliveryCandidate,
     DailyReportProfileRequest,
     DailyReportTransitionRequest,
+    GroupRollMarkSeenRequest,
 )
 
 
@@ -110,6 +115,34 @@ class DailyReportDeliveryTests(unittest.TestCase):
             self.session.scalar(select(DailyReportDelivery).where(DailyReportDelivery.group_id == "100")).instance_id,
             "instance-a",
         )
+
+    def test_claim_waits_until_persisted_cutoff(self) -> None:
+        self.now = dt.datetime(2026, 8, 30, 15, 44)
+
+        response = self._claim("instance-a")
+        row = self.session.scalar(select(DailyReportDelivery))
+
+        self.assertEqual(response.items, [])
+        self.assertEqual(response.next_claim_at, dt.datetime(2026, 8, 30, 15, 45))
+        self.assertEqual(row.status, "pending")
+        self.assertEqual(row.attempt_count, 0)
+        self.assertIsNone(row.claim_token)
+
+    def test_same_delivery_owner_recovers_unexpired_claim(self) -> None:
+        first = self._claim("instance-a").items[0]
+        row = self.session.scalar(select(DailyReportDelivery))
+        claimed_at = row.claimed_at
+        self.now += dt.timedelta(seconds=20)
+
+        recovered = self._claim("instance-a").items[0]
+        competing = self._claim("instance-b")
+
+        self.assertEqual(recovered.claim_token, first.claim_token)
+        self.assertEqual(recovered.attempt_count, first.attempt_count)
+        self.assertEqual(row.claimed_at, claimed_at)
+        self.assertEqual(row.attempt_count, 1)
+        self.assertEqual(competing.items, [])
+        self.assertEqual(competing.next_claim_at, claimed_at + DAILY_REPORT_CLAIM_TIMEOUT)
 
     def test_concurrent_claims_have_one_winner(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -384,6 +417,72 @@ class DailyReportMigrationTests(unittest.TestCase):
                 self.assertIsNone(row.next_attempt_at)
             engine.dispose()
 
+    def test_group_activity_backfill_uses_earliest_source_time(self) -> None:
+        engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+        Base.metadata.create_all(engine)
+        earliest = dt.datetime(2026, 8, 30, 15, 40)
+        with Session(engine) as session:
+            session.add_all([
+                GroupRoll(
+                    date_str=DATE,
+                    group_id="100",
+                    user_id="shared",
+                    pig_id="pig-a",
+                    seen_at=dt.datetime(2026, 8, 30, 15, 44),
+                ),
+                RoastEvent(
+                    date_str=DATE,
+                    group_id="100",
+                    event_type="success",
+                    attacker_id="shared",
+                    target_id="target",
+                    created_at=earliest,
+                ),
+                RoastReservation(
+                    reservation_id="reservation-a",
+                    date_str=DATE,
+                    group_id="100",
+                    target_id="target",
+                    owner_id="owner",
+                    owner_pig_id="pig-owner",
+                    delivery_bot_id="bot-a",
+                    created_at=dt.datetime(2026, 8, 30, 15, 41),
+                ),
+                RoastReservationParticipant(
+                    reservation_id="reservation-a",
+                    user_id="participant",
+                    pig_id="pig-participant",
+                    joined_at=dt.datetime(2026, 8, 30, 15, 42),
+                ),
+                # 模拟另一实例先按部署时间写入，迁移仍需把它修正到真实最早活动时间。
+                GroupDailyActiveUser(
+                    date_str=DATE,
+                    group_id="100",
+                    user_id="shared",
+                    active_at=dt.datetime(2026, 8, 30, 15, 50),
+                ),
+            ])
+            session.commit()
+
+        ensure_runtime_migrations(
+            engine,
+            backfill_group_activity=True,
+            activity_start=DATE,
+            activity_end=DATE,
+        )
+
+        with Session(engine) as session:
+            rows = {
+                row.user_id: row.active_at
+                for row in session.scalars(select(GroupDailyActiveUser)).all()
+            }
+        engine.dispose()
+
+        self.assertEqual(rows["shared"], earliest)
+        self.assertEqual(rows["target"], earliest)
+        self.assertEqual(rows["owner"], dt.datetime(2026, 8, 30, 15, 41))
+        self.assertEqual(rows["participant"], dt.datetime(2026, 8, 30, 15, 42))
+
     def test_delivery_identifiers_reject_values_longer_than_database_columns(self) -> None:
         with self.assertRaises(ValueError):
             DailyReportClaimRequest(
@@ -456,6 +555,42 @@ class DailyReportCutoffQueryTests(unittest.TestCase):
         self.assertEqual([item.attacker for item in events.items], ["before"])
         self.assertEqual([item.user_id for item in rolls.items], ["before"])
         self.assertEqual(active.user_ids, ["before"])
+
+    def test_group_roll_keeps_first_seen_pig_across_write_paths(self) -> None:
+        identity = ApiKeyIdentity(key_id="key-test", name="test")
+        mark_seen(
+            GroupRollMarkSeenRequest(
+                date_str=DATE,
+                group_id="100",
+                user_id="before",
+                pig_id="pig-late",
+            ),
+            self.session,
+            identity,
+        )
+        _ensure_group_roll(
+            self.session,
+            group_id="100",
+            user_id="before",
+            pig_id="pig-daily-roll",
+            date_str=DATE,
+        )
+        self.session.commit()
+
+        row = self.session.scalar(
+            select(GroupRoll).where(
+                GroupRoll.group_id == "100",
+                GroupRoll.user_id == "before",
+                GroupRoll.date_str == DATE,
+            )
+        )
+        cutoff_rolls = get_group_rolls("100", DATE, cutoff_at=CUTOFF, session=self.session)
+
+        self.assertEqual(row.pig_id, "pig-a")
+        self.assertEqual(
+            {item.user_id: item.pig_id for item in cutoff_rolls.items},
+            {"before": "pig-a"},
+        )
 
 
 if __name__ == "__main__":

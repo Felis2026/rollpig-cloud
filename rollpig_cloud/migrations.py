@@ -115,6 +115,89 @@ def _migrate_ambiguous_roast_reservations(engine: Engine) -> None:
         )
 
 
+# ================================ 群日活历史回填 ================================ #
+
+
+def _group_activity_source_queries(table_names: set[str]) -> list[str]:
+    """返回可用历史表的活动来源，并保留每类记录自己的真实发生时间。"""
+
+    sources: list[str] = []
+    if "group_rolls" in table_names:
+        sources.append(
+            "SELECT date_str, group_id, user_id, seen_at AS active_at "
+            "FROM group_rolls WHERE group_id <> '' AND user_id <> ''"
+        )
+    if "roast_events" in table_names:
+        sources.extend((
+            "SELECT date_str, group_id, attacker_id AS user_id, created_at AS active_at "
+            "FROM roast_events WHERE group_id <> '' AND attacker_id <> ''",
+            "SELECT date_str, group_id, target_id AS user_id, created_at AS active_at "
+            "FROM roast_events WHERE group_id <> '' AND target_id <> '' AND event_type <> 'bot_backfire'",
+        ))
+    if "roast_reservations" in table_names:
+        # 正常数据中主厨也会出现在参与者表；单列 owner 可兼容早期不完整记录。
+        sources.append(
+            "SELECT date_str, group_id, owner_id AS user_id, created_at AS active_at "
+            "FROM roast_reservations WHERE group_id <> '' AND owner_id <> ''"
+        )
+    if {"roast_reservations", "roast_reservation_participants"}.issubset(table_names):
+        sources.append(
+            "SELECT reservation.date_str, reservation.group_id, participant.user_id, "
+            "participant.joined_at AS active_at "
+            "FROM roast_reservations AS reservation "
+            "JOIN roast_reservation_participants AS participant "
+            "ON participant.reservation_id = reservation.reservation_id "
+            "WHERE reservation.group_id <> '' AND participant.user_id <> ''"
+        )
+    return sources
+
+
+def _backfill_group_activity(
+    engine: Engine,
+    table_names: set[str],
+    *,
+    start_date: dt.date,
+    end_date: dt.date,
+) -> None:
+    """按用户最早活动时间幂等回填，避免部署时刻污染日报截止点。"""
+
+    sources = _group_activity_source_queries(table_names)
+    if not sources:
+        return
+    aggregated_source = (
+        "SELECT source.date_str, source.group_id, source.user_id, MIN(source.active_at) AS active_at "
+        f"FROM ({' UNION ALL '.join(sources)}) AS source "
+        "WHERE source.date_str BETWEEN :activity_start AND :activity_end "
+        "GROUP BY source.date_str, source.group_id, source.user_id"
+    )
+    dialect_name = engine.dialect.name
+    if dialect_name == "sqlite":
+        statement = (
+            "INSERT INTO group_daily_active_users (date_str, group_id, user_id, active_at) "
+            f"{aggregated_source} "
+            "ON CONFLICT(date_str, group_id, user_id) DO UPDATE SET "
+            "active_at = MIN(group_daily_active_users.active_at, excluded.active_at)"
+        )
+    elif dialect_name == "mysql":
+        statement = (
+            "INSERT INTO group_daily_active_users (date_str, group_id, user_id, active_at) "
+            f"{aggregated_source} "
+            "ON DUPLICATE KEY UPDATE "
+            "active_at = LEAST(group_daily_active_users.active_at, VALUES(active_at))"
+        )
+    else:
+        # Cloud 正式支持 SQLite 与 MySQL；其他方言保留普通插入，避免静默跳过迁移。
+        statement = (
+            "INSERT INTO group_daily_active_users (date_str, group_id, user_id, active_at) "
+            f"{aggregated_source}"
+        )
+    with engine.begin() as conn:
+        conn.execute(
+            text(statement),
+            {"activity_start": start_date, "activity_end": end_date},
+        )
+
+
 def ensure_runtime_migrations(
     engine: Engine,
     *,
@@ -179,54 +262,9 @@ def ensure_runtime_migrations(
         business_today = dt.datetime.now(ROLLPIG_TIMEZONE).date()
         start_date = activity_start or business_today - dt.timedelta(days=1)
         end_date = activity_end or business_today
-        date_params = {"activity_start": start_date, "activity_end": end_date}
-        # 多实例首次启动可能同时判断为需要回填；数据库原生冲突忽略负责兜底唯一键竞争。
-        insert_clause = {
-            "mysql": "INSERT IGNORE INTO",
-            "sqlite": "INSERT OR IGNORE INTO",
-        }.get(engine.dialect.name, "INSERT INTO")
-        with engine.begin() as conn:
-            if "group_rolls" in table_names:
-                conn.execute(text(
-                    f"{insert_clause} group_daily_active_users (date_str, group_id, user_id, active_at) "
-                    "SELECT DISTINCT source.date_str, source.group_id, source.user_id, CURRENT_TIMESTAMP "
-                    "FROM group_rolls AS source "
-                    "WHERE source.date_str BETWEEN :activity_start AND :activity_end "
-                    "AND NOT EXISTS ("
-                    "SELECT 1 FROM group_daily_active_users AS active "
-                    "WHERE active.date_str = source.date_str "
-                    "AND active.group_id = source.group_id "
-                    "AND active.user_id = source.user_id)"
-                ), date_params)
-            if "roast_events" in table_names:
-                conn.execute(text(
-                    f"{insert_clause} group_daily_active_users (date_str, group_id, user_id, active_at) "
-                    "SELECT DISTINCT source.date_str, source.group_id, source.user_id, CURRENT_TIMESTAMP "
-                    "FROM ("
-                    "SELECT date_str, group_id, attacker_id AS user_id FROM roast_events "
-                    "WHERE group_id <> '' AND attacker_id <> '' "
-                    "UNION "
-                    "SELECT date_str, group_id, target_id AS user_id FROM roast_events "
-                    "WHERE group_id <> '' AND target_id <> '' AND event_type <> 'bot_backfire'"
-                    ") AS source "
-                    "WHERE source.date_str BETWEEN :activity_start AND :activity_end "
-                    "AND NOT EXISTS ("
-                    "SELECT 1 FROM group_daily_active_users AS active "
-                    "WHERE active.date_str = source.date_str "
-                    "AND active.group_id = source.group_id "
-                    "AND active.user_id = source.user_id)"
-                ), date_params)
-            if {"roast_reservations", "roast_reservation_participants"}.issubset(table_names):
-                conn.execute(text(
-                    f"{insert_clause} group_daily_active_users (date_str, group_id, user_id, active_at) "
-                    "SELECT DISTINCT reservation.date_str, reservation.group_id, participant.user_id, CURRENT_TIMESTAMP "
-                    "FROM roast_reservations AS reservation "
-                    "JOIN roast_reservation_participants AS participant "
-                    "ON participant.reservation_id = reservation.reservation_id "
-                    "WHERE reservation.date_str BETWEEN :activity_start AND :activity_end "
-                    "AND NOT EXISTS ("
-                    "SELECT 1 FROM group_daily_active_users AS active "
-                    "WHERE active.date_str = reservation.date_str "
-                    "AND active.group_id = reservation.group_id "
-                    "AND active.user_id = participant.user_id)"
-                ), date_params)
+        _backfill_group_activity(
+            engine,
+            table_names,
+            start_date=start_date,
+            end_date=end_date,
+        )

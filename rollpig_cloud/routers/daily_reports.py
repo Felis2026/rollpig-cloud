@@ -102,7 +102,7 @@ def _next_claim_at(
         deadline = _retry_deadline(row.date_str)
         candidate: dt.datetime | None = None
         if row.status == "pending":
-            candidate = row.next_attempt_at or now
+            candidate = max(row.cutoff_at, row.next_attempt_at or row.cutoff_at)
         elif (
             row.status == "claimed"
             and row.claim_token not in claimed_tokens
@@ -294,8 +294,32 @@ def _claim_once(
             row.last_error = row.last_error or "retry_deadline_exceeded"
             _clear_claim(row)
             continue
+        current_bot_id = candidates[row.group_id][:64]
+        same_owner_claim = (
+            row.status == "claimed"
+            and row.claim_token is not None
+            and row.claimed_at is not None
+            and row.claimed_at >= stale_before
+            and row.instance_id == str(req.instance_id)[:64]
+            and row.delivery_bot_id == current_bot_id
+        )
+        if same_owner_claim:
+            # HTTP 响应可能在 Cloud 已提交后丢失；同一投递者可取回原租约，不能再等五分钟。
+            claimed.append(
+                DailyReportClaimItem(
+                    date_str=row.date_str,
+                    group_id=row.group_id,
+                    delivery_bot_id=row.delivery_bot_id,
+                    cutoff_at=row.cutoff_at,
+                    claim_token=row.claim_token,
+                    status=row.status,
+                    attempt_count=row.attempt_count,
+                )
+            )
+            continue
         pending_due = (
             row.status == "pending"
+            and now >= row.cutoff_at
             and (row.next_attempt_at is None or row.next_attempt_at <= now)
         )
         reclaimable = pending_due or (
@@ -312,7 +336,7 @@ def _claim_once(
             continue
         row.status = "claimed"
         row.instance_id = str(req.instance_id)[:64]
-        row.delivery_bot_id = candidates[row.group_id][:64]
+        row.delivery_bot_id = current_bot_id
         row.claim_token = uuid.uuid4().hex
         row.claimed_at = now
         row.attempt_count += 1

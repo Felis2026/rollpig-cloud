@@ -31,11 +31,9 @@ def mark_seen(
         )
     ).scalar_one_or_none()
     created = existing is None
-    changed = existing is not None and existing.pig_id != req.pig_id
-    if existing:
-        existing.pig_id = req.pig_id
-    else:
+    if existing is None:
         session.add(GroupRoll(group_id=req.group_id, user_id=req.user_id, pig_id=req.pig_id, date_str=req.date_str))
+    # 群内首次见到的小猪属于日报截止点历史；后续冲突写入不能改写已经发生的结果。
     mark_group_active_users(
         session,
         date_str=req.date_str,
@@ -47,8 +45,7 @@ def mark_seen(
         identity,
         operation="POST /v1/group-rolls/mark-seen",
         created_records=int(created),
-        updated_records=int(changed),
-        idempotent_hits=int(not created and not changed),
+        idempotent_hits=int(not created),
     )
     session.commit()
     return {"ok": True}
