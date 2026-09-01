@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from ..auth import verify_token
 from ..config import ApiKeyIdentity
-from ..db import get_session
+from ..db import database_cutoff_value, get_session
 from ..models import GroupRoll
 from ..schemas import GroupRollItem, GroupRollListResponse, GroupRollMarkSeenRequest
 from ..services.roast_refills import mark_group_active_users
@@ -31,11 +31,9 @@ def mark_seen(
         )
     ).scalar_one_or_none()
     created = existing is None
-    changed = existing is not None and existing.pig_id != req.pig_id
-    if existing:
-        existing.pig_id = req.pig_id
-    else:
+    if existing is None:
         session.add(GroupRoll(group_id=req.group_id, user_id=req.user_id, pig_id=req.pig_id, date_str=req.date_str))
+    # 群内首次见到的小猪属于日报截止点历史；后续冲突写入不能改写已经发生的结果。
     mark_group_active_users(
         session,
         date_str=req.date_str,
@@ -47,16 +45,25 @@ def mark_seen(
         identity,
         operation="POST /v1/group-rolls/mark-seen",
         created_records=int(created),
-        updated_records=int(changed),
-        idempotent_hits=int(not created and not changed),
+        idempotent_hits=int(not created),
     )
     session.commit()
     return {"ok": True}
 
 
 @router.get("", response_model=GroupRollListResponse)
-def get_group_rolls(group_id: str, date_str: dt.date, session: Session = Depends(get_session)):
-    rows = session.execute(
-        select(GroupRoll).where(GroupRoll.group_id == group_id, GroupRoll.date_str == date_str)
-    ).scalars().all()
+def get_group_rolls(
+    group_id: str,
+    date_str: dt.date,
+    session: Session = Depends(get_session),
+    cutoff_at: dt.datetime | None = None,
+):
+    stmt = select(GroupRoll).where(
+        GroupRoll.group_id == group_id,
+        GroupRoll.date_str == date_str,
+    )
+    if cutoff_at is not None:
+        normalized_cutoff = database_cutoff_value(session, cutoff_at)
+        stmt = stmt.where(GroupRoll.seen_at <= normalized_cutoff)
+    rows = session.execute(stmt).scalars().all()
     return GroupRollListResponse(items=[GroupRollItem(user_id=row.user_id, pig_id=row.pig_id) for row in rows])

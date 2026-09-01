@@ -10,6 +10,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ..db import database_cutoff_value
 from ..models import GroupDailyActiveUser, GroupRoastRefillRequest, UserUsage
 from ..schemas import (
     GroupRoastRefillCompleteResponse,
@@ -32,7 +33,7 @@ def _utc_from_ts(value: float | None = None) -> dt.datetime:
         if value is not None
         else dt.datetime.now(dt.timezone.utc)
     )
-    # 现有 Cloud DateTime 字段统一存 UTC-naive；只在转换边界去掉 tzinfo。
+    # 补货生命周期由应用主动写入 UTC-naive；server-default 活动时间仍沿用数据库时区。
     return aware.replace(tzinfo=None)
 
 
@@ -145,15 +146,20 @@ def mark_group_active_users(
             continue
 
 
-def get_group_active_user_ids(session: Session, date_str: dt.date, group_id: str) -> list[str]:
-    return sorted(
-        session.execute(
-            select(GroupDailyActiveUser.user_id).where(
-                GroupDailyActiveUser.date_str == date_str,
-                GroupDailyActiveUser.group_id == str(group_id),
-            )
-        ).scalars()
+def get_group_active_user_ids(
+    session: Session,
+    date_str: dt.date,
+    group_id: str,
+    cutoff_at: dt.datetime | None = None,
+) -> list[str]:
+    stmt = select(GroupDailyActiveUser.user_id).where(
+        GroupDailyActiveUser.date_str == date_str,
+        GroupDailyActiveUser.group_id == str(group_id),
     )
+    if cutoff_at is not None:
+        normalized_cutoff = database_cutoff_value(session, cutoff_at)
+        stmt = stmt.where(GroupDailyActiveUser.active_at <= normalized_cutoff)
+    return sorted(session.execute(stmt).scalars())
 
 
 def _reset_roast_charges(

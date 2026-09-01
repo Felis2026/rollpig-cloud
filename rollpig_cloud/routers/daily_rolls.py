@@ -38,11 +38,9 @@ def _ensure_group_roll(session: Session, group_id: str, user_id: str, pig_id: st
             GroupRoll.date_str == date_str,
         )
     ).scalar_one_or_none()
-    if existing:
-        if existing.pig_id != pig_id:
-            existing.pig_id = pig_id
-    else:
+    if existing is None:
         session.add(GroupRoll(group_id=group_id, user_id=user_id, pig_id=pig_id, date_str=date_str))
+    # GroupRoll 记录首次群内出现结果，不能被截止点后的重复同步改写。
     mark_group_active_users(
         session,
         date_str=date_str,

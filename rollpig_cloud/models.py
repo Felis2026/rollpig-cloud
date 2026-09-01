@@ -226,6 +226,38 @@ class RoastReservationParticipant(Base):
     joined_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
 
+# ================================ 猪圈日报投递状态 ================================ #
+# 日期与群号唯一，确保多个 Plus 实例共享 Cloud 时只有一个实例能进入外部发送阶段。
+class DailyReportDelivery(Base):
+    __tablename__ = "daily_report_deliveries"
+    __table_args__ = (
+        UniqueConstraint("date_str", "group_id", name="uq_daily_report_delivery_date_group"),
+        Index("ix_daily_report_delivery_status", "date_str", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    date_str: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    group_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    instance_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    delivery_bot_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    claim_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    cutoff_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
+    claimed_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    sent_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    message_id: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    last_error: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 # ================================ 烤箱补货状态 ================================ #
 # active_key 只在 voting 状态保留；唯一约束让多实例同时发起时最多创建一场活动申请。
 class GroupDailyActiveUser(Base):

@@ -54,8 +54,20 @@ def mark_active_users(req: GroupActiveUsersMarkRequest, session: Session = Depen
 
 
 @router.get("/active-users", response_model=GroupActiveUsersResponse)
-def list_active_users(group_id: str, date_str: dt.date, session: Session = Depends(get_session)):
-    return GroupActiveUsersResponse(user_ids=get_group_active_user_ids(session, date_str, group_id))
+def list_active_users(
+    group_id: str,
+    date_str: dt.date,
+    session: Session = Depends(get_session),
+    cutoff_at: dt.datetime | None = None,
+):
+    return GroupActiveUsersResponse(
+        user_ids=get_group_active_user_ids(
+            session,
+            date_str,
+            group_id,
+            cutoff_at=cutoff_at,
+        )
+    )
 
 
 # ================================ 申请生命周期 ================================ #

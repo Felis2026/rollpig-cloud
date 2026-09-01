@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_serializer, field_validator
 
 
 class DailyRollGetOrCreateRequest(BaseModel):
@@ -117,6 +117,111 @@ class GroupRollItem(BaseModel):
 
 class GroupRollListResponse(BaseModel):
     items: list[GroupRollItem] = Field(default_factory=list)
+
+
+# ================================ 猪圈日报投递 ================================ #
+
+
+def _serialize_utc_coordination_time(value: dt.datetime | None) -> str | None:
+    """为日报协调时间补回 UTC 标识，避免客户端把 UTC-naive 当作本地时间。"""
+
+    if value is None:
+        return None
+    aware = (
+        value.replace(tzinfo=dt.timezone.utc)
+        if value.tzinfo is None
+        else value.astimezone(dt.timezone.utc)
+    )
+    return aware.isoformat().replace("+00:00", "Z")
+
+
+class DailyReportDeliveryCandidate(BaseModel):
+    group_id: str = Field(min_length=1, max_length=64)
+    delivery_bot_id: str = Field(min_length=1, max_length=64)
+
+
+class DailyReportProfileRequest(BaseModel):
+    """一次读取日报候选用户的历史稳定排行资料。"""
+
+    date_str: dt.date
+    group_id: str = Field(min_length=1, max_length=64)
+    cutoff_at: dt.datetime
+    user_ids: list[str] = Field(default_factory=list, max_length=2048)
+
+    @field_validator("user_ids")
+    @classmethod
+    def normalize_user_ids(cls, value: list[str]) -> list[str]:
+        normalized = sorted({str(user_id).strip() for user_id in value if str(user_id).strip()})
+        if any(len(user_id) > 64 for user_id in normalized):
+            raise ValueError("user_ids 中的用户标识不能超过 64 个字符")
+        return normalized
+
+
+class DailyReportProfileItem(BaseModel):
+    user_id: str
+    daily_pig_id: str = ""
+    daily_ex_level: int | None = Field(default=None, ge=0, le=5)
+    daily_achieved_at: dt.datetime | None = None
+    catalog_count: int = Field(default=0, ge=0)
+    catalog_achieved_at: dt.datetime | None = None
+    recent_pig_id: str = ""
+    recent_ex_level: int | None = Field(default=None, ge=0, le=5)
+
+
+class DailyReportProfileResponse(BaseModel):
+    items: list[DailyReportProfileItem] = Field(default_factory=list)
+
+
+class DailyReportClaimRequest(BaseModel):
+    date_str: dt.date
+    cutoff_at: dt.datetime
+    instance_id: str = Field(min_length=1, max_length=64)
+    candidates: list[DailyReportDeliveryCandidate] = Field(default_factory=list, max_length=256)
+
+
+class DailyReportClaimItem(BaseModel):
+    date_str: dt.date
+    group_id: str
+    delivery_bot_id: str
+    cutoff_at: dt.datetime
+    claim_token: str
+    status: str = "claimed"
+    attempt_count: int = 1
+
+    @field_serializer("cutoff_at", when_used="json")
+    def serialize_cutoff_at(self, value: dt.datetime) -> str:
+        """投递表内部保持 UTC-naive；仅在 HTTP JSON 中恢复明确的 UTC 时区。"""
+
+        return str(_serialize_utc_coordination_time(value))
+
+
+class DailyReportClaimResponse(BaseModel):
+    items: list[DailyReportClaimItem] = Field(default_factory=list)
+    next_claim_at: dt.datetime | None = None
+
+    @field_serializer("next_claim_at", when_used="json")
+    def serialize_next_claim_at(self, value: dt.datetime | None) -> str | None:
+        return _serialize_utc_coordination_time(value)
+
+
+class DailyReportTransitionRequest(BaseModel):
+    date_str: dt.date
+    group_id: str = Field(min_length=1, max_length=64)
+    claim_token: str = Field(min_length=1, max_length=64)
+    action: Literal["sending", "sent", "release", "uncertain", "skip"]
+    message_id: str = Field(default="", max_length=128)
+    error: str = Field(default="", max_length=512)
+
+
+class DailyReportTransitionResponse(BaseModel):
+    ok: bool
+    status: str = ""
+    attempt_count: int = 0
+    next_attempt_at: dt.datetime | None = None
+
+    @field_serializer("next_attempt_at", when_used="json")
+    def serialize_next_attempt_at(self, value: dt.datetime | None) -> str | None:
+        return _serialize_utc_coordination_time(value)
 
 
 class ConsumeRoastRequest(BaseModel):

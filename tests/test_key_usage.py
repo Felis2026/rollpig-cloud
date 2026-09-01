@@ -123,10 +123,19 @@ class SourceKeyUsageTests(unittest.TestCase):
 
     def test_concurrent_requests_use_atomic_counters(self):
         def record_once(_index: int) -> None:
-            self._record(method="POST", operation="POST /v1/events", status_code=200)
+            record_key_request(
+                self.identity,
+                method="POST",
+                operation="POST /v1/events",
+                status_code=200,
+                session_factory=self.session_factory,
+            )
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            list(executor.map(record_once, range(24)))
+        # patch 不是线程隔离的，必须包住整个并发区；让每个 worker 各自进入 patch
+        # 会因退出顺序互相恢复全局函数，偶发把一次请求计入真实业务日期。
+        with patch("rollpig_cloud.services.key_usage.rollpig_today", return_value=self.business_date):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+                list(executor.map(record_once, range(24)))
 
         with self.session_factory() as session:
             usage = session.scalar(select(SourceKeyDailyUsage))
