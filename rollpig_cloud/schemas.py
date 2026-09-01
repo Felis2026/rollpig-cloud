@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_serializer, field_validator
 
 
 class DailyRollGetOrCreateRequest(BaseModel):
@@ -122,6 +122,19 @@ class GroupRollListResponse(BaseModel):
 # ================================ 猪圈日报投递 ================================ #
 
 
+def _serialize_utc_coordination_time(value: dt.datetime | None) -> str | None:
+    """为日报协调时间补回 UTC 标识，避免客户端把 UTC-naive 当作本地时间。"""
+
+    if value is None:
+        return None
+    aware = (
+        value.replace(tzinfo=dt.timezone.utc)
+        if value.tzinfo is None
+        else value.astimezone(dt.timezone.utc)
+    )
+    return aware.isoformat().replace("+00:00", "Z")
+
+
 class DailyReportDeliveryCandidate(BaseModel):
     group_id: str = Field(min_length=1, max_length=64)
     delivery_bot_id: str = Field(min_length=1, max_length=64)
@@ -175,10 +188,20 @@ class DailyReportClaimItem(BaseModel):
     status: str = "claimed"
     attempt_count: int = 1
 
+    @field_serializer("cutoff_at", when_used="json")
+    def serialize_cutoff_at(self, value: dt.datetime) -> str:
+        """投递表内部保持 UTC-naive；仅在 HTTP JSON 中恢复明确的 UTC 时区。"""
+
+        return str(_serialize_utc_coordination_time(value))
+
 
 class DailyReportClaimResponse(BaseModel):
     items: list[DailyReportClaimItem] = Field(default_factory=list)
     next_claim_at: dt.datetime | None = None
+
+    @field_serializer("next_claim_at", when_used="json")
+    def serialize_next_claim_at(self, value: dt.datetime | None) -> str | None:
+        return _serialize_utc_coordination_time(value)
 
 
 class DailyReportTransitionRequest(BaseModel):
@@ -195,6 +218,10 @@ class DailyReportTransitionResponse(BaseModel):
     status: str = ""
     attempt_count: int = 0
     next_attempt_at: dt.datetime | None = None
+
+    @field_serializer("next_attempt_at", when_used="json")
+    def serialize_next_attempt_at(self, value: dt.datetime | None) -> str | None:
+        return _serialize_utc_coordination_time(value)
 
 
 class ConsumeRoastRequest(BaseModel):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
 import tempfile
 import unittest
@@ -31,6 +32,7 @@ from rollpig_cloud.models import (
 )
 from rollpig_cloud.routers.daily_reports import (
     DAILY_REPORT_CLAIM_TIMEOUT,
+    DAILY_REPORT_MAX_ATTEMPTS,
     DAILY_REPORT_RETRY_DELAYS,
     claim_daily_reports,
     get_daily_report_profiles,
@@ -129,6 +131,34 @@ class DailyReportDeliveryTests(unittest.TestCase):
         self.assertEqual(row.status, "pending")
         self.assertEqual(row.attempt_count, 0)
         self.assertIsNone(row.claim_token)
+
+    def test_coordination_times_serialize_as_explicit_utc(self) -> None:
+        self.now = dt.datetime(2026, 8, 30, 15, 44)
+        waiting = self._claim("instance-a")
+        waiting_payload = json.loads(waiting.model_dump_json())
+        self.now = NOW
+        claim = self._claim("instance-a").items[0]
+        claim_payload = json.loads(claim.model_dump_json())
+        released = self._transition(claim, "release")
+        released_payload = json.loads(released.model_dump_json())
+
+        self.assertEqual(waiting_payload["next_claim_at"], "2026-08-30T15:45:00Z")
+        self.assertEqual(claim_payload["cutoff_at"], "2026-08-30T15:45:00Z")
+        self.assertEqual(released_payload["next_attempt_at"], "2026-08-30T15:46:30Z")
+
+        round_trip_cutoff = dt.datetime.fromisoformat(
+            claim_payload["cutoff_at"].replace("Z", "+00:00")
+        )
+        mysql_session = SimpleNamespace(
+            get_bind=lambda: SimpleNamespace(
+                dialect=SimpleNamespace(name="mysql")
+            )
+        )
+        mysql_cutoff = database_cutoff_value(mysql_session, round_trip_cutoff)
+        self.assertEqual(
+            next(iter(mysql_cutoff.clauses)).value,
+            CUTOFF.timestamp(),
+        )
 
     def test_same_delivery_owner_recovers_unexpired_claim(self) -> None:
         first = self._claim("instance-a").items[0]
@@ -302,6 +332,80 @@ class DailyReportDeliveryTests(unittest.TestCase):
         self.assertEqual(current.attempt_count, 2)
         self.assertTrue(accepted.ok)
         self.assertEqual(accepted.status, "sending")
+
+    def test_stale_automatic_failure_cannot_override_sending(self) -> None:
+        cases = (
+            (
+                "deadline",
+                dt.datetime(2026, 8, 30, 16, 10),
+                1,
+                dt.datetime(2026, 8, 30, 15, 46),
+            ),
+            (
+                "attempts",
+                dt.datetime(2026, 8, 30, 15, 55),
+                DAILY_REPORT_MAX_ATTEMPTS,
+                dt.datetime(2026, 8, 30, 15, 49),
+            ),
+        )
+        for case_name, claim_now, attempt_count, claimed_at in cases:
+            with self.subTest(case=case_name), tempfile.TemporaryDirectory() as temp_dir:
+                database_path = Path(temp_dir) / f"stale-{case_name}.sqlite3"
+                engine = create_engine(
+                    f"sqlite+pysqlite:///{database_path.as_posix()}",
+                    future=True,
+                    connect_args={"check_same_thread": False, "timeout": 10},
+                )
+                Base.metadata.create_all(engine)
+                claim_token = f"{case_name}-token"
+                with Session(engine) as session:
+                    session.add(
+                        DailyReportDelivery(
+                            date_str=DATE,
+                            group_id="100",
+                            status="claimed",
+                            instance_id="instance-a",
+                            delivery_bot_id="bot-a",
+                            claim_token=claim_token,
+                            cutoff_at=dt.datetime(2026, 8, 30, 15, 45),
+                            claimed_at=claimed_at,
+                            attempt_count=attempt_count,
+                        )
+                    )
+                    session.commit()
+
+                with Session(engine, expire_on_commit=False) as stale_session:
+                    stale_row = stale_session.scalar(select(DailyReportDelivery))
+                    with Session(engine, expire_on_commit=False) as winner_session:
+                        winner = transition_daily_report(
+                            DailyReportTransitionRequest(
+                                date_str=DATE,
+                                group_id="100",
+                                claim_token=claim_token,
+                                action="sending",
+                            ),
+                            winner_session,
+                        )
+                    self.assertTrue(winner.ok)
+                    self.assertEqual(stale_row.status, "claimed")
+
+                    with patch(
+                        "rollpig_cloud.routers.daily_reports._utc_now",
+                        return_value=claim_now,
+                    ):
+                        stale_claim = claim_daily_reports(
+                            _claim_request("instance-b"),
+                            stale_session,
+                        )
+
+                with Session(engine) as session:
+                    current = session.scalar(select(DailyReportDelivery))
+                engine.dispose()
+
+                self.assertEqual(stale_claim.items, [])
+                self.assertEqual(current.status, "sending")
+                self.assertEqual(current.claim_token, claim_token)
+                self.assertEqual(current.attempt_count, attempt_count)
 
     def test_sending_terminal_and_uncertain_states_are_not_reclaimed(self) -> None:
         actions = {

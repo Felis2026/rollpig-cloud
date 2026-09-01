@@ -72,15 +72,6 @@ def _expert_level_from_copies(copies: int | None) -> int | None:
     return min(max(int(copies) - 1, 0), 5)
 
 
-def _clear_claim(row: DailyReportDelivery) -> None:
-    """释放领取凭证；终态和待重试状态都不能继续复用旧令牌。"""
-
-    row.claim_token = None
-    row.claimed_at = None
-    row.instance_id = ""
-    row.delivery_bot_id = ""
-
-
 def _claim_item(row: DailyReportDelivery) -> DailyReportClaimItem:
     """从已持久化的租约生成响应，确保新领取与令牌恢复返回同一口径。"""
 
@@ -125,6 +116,44 @@ def _next_claim_at(
         if candidate is not None and candidate < deadline:
             candidates.append(candidate)
     return min(candidates, default=None)
+
+
+def _fail_delivery_if_unchanged(
+    session: Session,
+    row: DailyReportDelivery,
+    *,
+    reason: str,
+) -> bool:
+    """仅在租约仍与当前快照一致时标记失败，避免 SQLite 陈旧对象覆盖发送状态。"""
+
+    observed_status = row.status
+    observed_claim_token = row.claim_token
+    observed_attempt_count = row.attempt_count
+    if observed_status not in {"pending", "claimed"}:
+        return False
+    result = session.execute(
+        update(DailyReportDelivery)
+        .where(
+            DailyReportDelivery.id == row.id,
+            DailyReportDelivery.status == observed_status,
+            DailyReportDelivery.claim_token == observed_claim_token,
+            DailyReportDelivery.attempt_count == observed_attempt_count,
+        )
+        .values(
+            status="failed",
+            next_attempt_at=None,
+            last_error=row.last_error or reason,
+            claim_token=None,
+            claimed_at=None,
+            instance_id="",
+            delivery_bot_id="",
+        )
+        .execution_options(synchronize_session=False)
+    )
+    # MySQL 行锁先减少竞争，条件 UPDATE 再为不支持 FOR UPDATE 的 SQLite 兜底。
+    session.expire(row)
+    session.refresh(row)
+    return result.rowcount == 1
 
 
 # ================================ 群级排行资料 ================================ #
@@ -305,10 +334,11 @@ def _claim_once(
     for row in rows:
         deadline = _retry_deadline(row.date_str)
         if now >= deadline and row.status in {"pending", "claimed"}:
-            row.status = "failed"
-            row.next_attempt_at = None
-            row.last_error = row.last_error or "retry_deadline_exceeded"
-            _clear_claim(row)
+            _fail_delivery_if_unchanged(
+                session,
+                row,
+                reason="retry_deadline_exceeded",
+            )
             continue
         current_bot_id = candidates[row.group_id][:64]
         same_owner_claim = (
@@ -335,10 +365,11 @@ def _claim_once(
         if not pending_due and not stale_claim:
             continue
         if row.attempt_count >= DAILY_REPORT_MAX_ATTEMPTS:
-            row.status = "failed"
-            row.next_attempt_at = None
-            row.last_error = row.last_error or "retry_attempts_exhausted"
-            _clear_claim(row)
+            _fail_delivery_if_unchanged(
+                session,
+                row,
+                reason="retry_attempts_exhausted",
+            )
             continue
         previous_attempt_count = row.attempt_count
         claim_token = uuid.uuid4().hex
@@ -444,7 +475,11 @@ def transition_daily_report(
         allowed_statuses = ("sending", "sent")
         response_status = "sent"
         response_next_attempt_at = None
-        values.update(status="sent", sent_at=row.sent_at or now, next_attempt_at=None)
+        values.update(
+            status="sent",
+            sent_at=func.coalesce(DailyReportDelivery.sent_at, now),
+            next_attempt_at=None,
+        )
         if req.message_id:
             values["message_id"] = str(req.message_id)[:128]
     elif req.action == "release":
