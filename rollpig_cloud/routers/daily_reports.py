@@ -458,6 +458,26 @@ def transition_daily_report(
         return DailyReportTransitionResponse(ok=False)
 
     now = _utc_now()
+    # 截止时间约束的是“是否还允许开始外部发送”。已经进入 sending 的任务可能已经
+    # 调用了 Bot API，仍须允许幂等确认及 sent/uncertain 收尾，不能在截止后统一拒绝。
+    if (
+        req.action == "sending"
+        and row.status == "claimed"
+        and now >= _retry_deadline(row.date_str)
+    ):
+        _fail_delivery_if_unchanged(
+            session,
+            row,
+            reason="retry_deadline_exceeded",
+        )
+        session.commit()
+        return DailyReportTransitionResponse(
+            ok=False,
+            status=row.status,
+            attempt_count=row.attempt_count,
+            next_attempt_at=row.next_attempt_at,
+        )
+
     allowed_statuses: tuple[str, ...]
     values: dict[str, object] = {
         "last_error": str(req.error or "")[:512],

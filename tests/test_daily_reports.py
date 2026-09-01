@@ -313,7 +313,10 @@ class DailyReportDeliveryTests(unittest.TestCase):
                     stale_session,
                 )
 
-            with Session(engine, expire_on_commit=False) as session:
+            with (
+                patch("rollpig_cloud.routers.daily_reports._utc_now", return_value=self.now),
+                Session(engine, expire_on_commit=False) as session,
+            ):
                 current = session.scalar(select(DailyReportDelivery))
                 accepted = transition_daily_report(
                     DailyReportTransitionRequest(
@@ -376,7 +379,13 @@ class DailyReportDeliveryTests(unittest.TestCase):
 
                 with Session(engine, expire_on_commit=False) as stale_session:
                     stale_row = stale_session.scalar(select(DailyReportDelivery))
-                    with Session(engine, expire_on_commit=False) as winner_session:
+                    with (
+                        patch(
+                            "rollpig_cloud.routers.daily_reports._utc_now",
+                            return_value=dt.datetime(2026, 8, 30, 15, 50),
+                        ),
+                        Session(engine, expire_on_commit=False) as winner_session,
+                    ):
                         winner = transition_daily_report(
                             DailyReportTransitionRequest(
                                 date_str=DATE,
@@ -480,6 +489,35 @@ class DailyReportDeliveryTests(unittest.TestCase):
 
         self.assertEqual(released.status, "failed")
         self.assertIsNone(released.next_attempt_at)
+
+    def test_sending_cannot_start_after_daily_deadline(self) -> None:
+        self.now = dt.datetime(2026, 8, 30, 16, 9, 59)
+        claim = self._claim("instance-a").items[0]
+        self.now = dt.datetime(2026, 8, 30, 16, 10)
+
+        rejected = self._transition(claim, "sending")
+        row = self.session.scalar(
+            select(DailyReportDelivery).where(DailyReportDelivery.group_id == "100")
+        )
+
+        self.assertFalse(rejected.ok)
+        self.assertEqual(rejected.status, "failed")
+        self.assertEqual(row.status, "failed")
+        self.assertIsNone(row.claim_token)
+        self.assertEqual(row.last_error, "retry_deadline_exceeded")
+
+    def test_sending_started_before_deadline_can_finish_after_deadline(self) -> None:
+        claim = self._claim("instance-a").items[0]
+        self.assertTrue(self._transition(claim, "sending").ok)
+        self.now = dt.datetime(2026, 8, 30, 16, 10)
+
+        repeated = self._transition(claim, "sending")
+        completed = self._transition(claim, "sent")
+
+        self.assertTrue(repeated.ok)
+        self.assertEqual(repeated.status, "sending")
+        self.assertTrue(completed.ok)
+        self.assertEqual(completed.status, "sent")
 
 
 class DailyReportProfileTests(unittest.TestCase):
