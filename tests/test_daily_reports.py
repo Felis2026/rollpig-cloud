@@ -7,6 +7,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from sqlalchemy import create_engine, inspect, select, text
@@ -16,8 +17,7 @@ os.environ.setdefault("ROLLPIG_CLOUD_DATABASE_URL", "sqlite+pysqlite:///:memory:
 
 from rollpig_cloud import db as cloud_db
 from rollpig_cloud.config import ApiKeyIdentity, ROLLPIG_TIMEZONE
-from rollpig_cloud.db import Base
-from rollpig_cloud.db import _engine_connect_args
+from rollpig_cloud.db import Base, database_cutoff_value
 from rollpig_cloud.migrations import ensure_runtime_migrations
 from rollpig_cloud.models import (
     Collection,
@@ -235,6 +235,74 @@ class DailyReportDeliveryTests(unittest.TestCase):
         self.assertNotEqual(reclaimed.claim_token, first.claim_token)
         self.assertEqual(reclaimed.delivery_bot_id, "bot-a")
 
+    def test_stale_transition_cannot_override_reclaimed_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "stale-transition.sqlite3"
+            engine = create_engine(
+                f"sqlite+pysqlite:///{database_path.as_posix()}",
+                future=True,
+                connect_args={"check_same_thread": False, "timeout": 10},
+            )
+            Base.metadata.create_all(engine)
+            stale_token = "stale-token"
+            with Session(engine) as session:
+                session.add(
+                    DailyReportDelivery(
+                        date_str=DATE,
+                        group_id="100",
+                        status="claimed",
+                        instance_id="instance-a",
+                        delivery_bot_id="bot-a",
+                        claim_token=stale_token,
+                        cutoff_at=dt.datetime(2026, 8, 30, 15, 45),
+                        claimed_at=self.now - DAILY_REPORT_CLAIM_TIMEOUT - dt.timedelta(seconds=1),
+                        attempt_count=1,
+                    )
+                )
+                session.commit()
+
+            with Session(engine, expire_on_commit=False) as stale_session:
+                stale_row = stale_session.scalar(select(DailyReportDelivery))
+                with (
+                    patch("rollpig_cloud.routers.daily_reports._utc_now", return_value=self.now),
+                    Session(engine, expire_on_commit=False) as winner_session,
+                ):
+                    winner = claim_daily_reports(
+                        _claim_request("instance-b"),
+                        winner_session,
+                    ).items[0]
+
+                self.assertEqual(stale_row.claim_token, stale_token)
+                rejected = transition_daily_report(
+                    DailyReportTransitionRequest(
+                        date_str=DATE,
+                        group_id="100",
+                        claim_token=stale_token,
+                        action="sending",
+                    ),
+                    stale_session,
+                )
+
+            with Session(engine, expire_on_commit=False) as session:
+                current = session.scalar(select(DailyReportDelivery))
+                accepted = transition_daily_report(
+                    DailyReportTransitionRequest(
+                        date_str=DATE,
+                        group_id="100",
+                        claim_token=winner.claim_token,
+                        action="sending",
+                    ),
+                    session,
+                )
+            engine.dispose()
+
+        self.assertFalse(rejected.ok)
+        self.assertEqual(rejected.status, "claimed")
+        self.assertEqual(current.claim_token, winner.claim_token)
+        self.assertEqual(current.attempt_count, 2)
+        self.assertTrue(accepted.ok)
+        self.assertEqual(accepted.status, "sending")
+
     def test_sending_terminal_and_uncertain_states_are_not_reclaimed(self) -> None:
         actions = {
             "sending": ("sending",),
@@ -411,12 +479,26 @@ class DailyReportProfileTests(unittest.TestCase):
 
 
 class DailyReportMigrationTests(unittest.TestCase):
-    def test_mysql_connections_initialize_utc_session(self) -> None:
-        self.assertEqual(
-            _engine_connect_args("mysql+pymysql://user:pass@example.com/rollpig"),
-            {"init_command": "SET time_zone = '+00:00'"},
+    def test_cutoff_conversion_preserves_database_time_basis(self) -> None:
+        mysql_session = SimpleNamespace(
+            get_bind=lambda: SimpleNamespace(
+                dialect=SimpleNamespace(name="mysql")
+            )
         )
-        self.assertEqual(_engine_connect_args("sqlite+pysqlite:///:memory:"), {})
+        sqlite_session = SimpleNamespace(
+            get_bind=lambda: SimpleNamespace(
+                dialect=SimpleNamespace(name="sqlite")
+            )
+        )
+
+        mysql_cutoff = database_cutoff_value(mysql_session, CUTOFF)
+        sqlite_cutoff = database_cutoff_value(sqlite_session, CUTOFF)
+        naive_cutoff = dt.datetime(2026, 8, 30, 23, 45)
+
+        self.assertEqual(mysql_cutoff.name, "from_unixtime")
+        self.assertEqual(next(iter(mysql_cutoff.clauses)).value, CUTOFF.timestamp())
+        self.assertEqual(sqlite_cutoff, dt.datetime(2026, 8, 30, 15, 45))
+        self.assertIs(database_cutoff_value(mysql_session, naive_cutoff), naive_cutoff)
 
     def test_runtime_migration_adds_retry_columns_idempotently(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

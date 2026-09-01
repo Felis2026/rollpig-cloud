@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from ..auth import verify_token
 from ..config import ROLLPIG_TIMEZONE
-from ..db import get_session
+from ..db import database_cutoff_value, get_session
 from ..models import Collection, DailyReportDelivery, DailyRoll, GroupRoll
 from ..schemas import (
     DailyReportClaimItem,
@@ -40,7 +40,7 @@ DAILY_REPORT_RETRY_CUTOFF = dt.time(0, 10)
 
 
 def _naive_utc(value: dt.datetime) -> dt.datetime:
-    """数据库统一存 UTC naive，API 仍接受携带业务时区的截止时间。"""
+    """日报投递协调字段使用 UTC naive，不与数据库 server-default 时间混用。"""
 
     if value.tzinfo is None:
         return value
@@ -140,7 +140,7 @@ def get_daily_report_profiles(
     user_ids = tuple(req.user_ids)
     if not user_ids:
         return DailyReportProfileResponse()
-    cutoff_at = _naive_utc(req.cutoff_at)
+    cutoff_at = database_cutoff_value(session, req.cutoff_at)
 
     group_rolls: dict[str, str] = {}
     daily_rolls: dict[str, DailyRoll] = {}
@@ -427,79 +427,101 @@ def transition_daily_report(
         return DailyReportTransitionResponse(ok=False)
 
     now = _utc_now()
+    allowed_statuses: tuple[str, ...]
+    values: dict[str, object] = {
+        "last_error": str(req.error or "")[:512],
+    }
+    response_status = row.status
+    response_next_attempt_at = row.next_attempt_at
 
     # ================================ 投递状态迁移 ================================ #
     if req.action == "sending":
-        if row.status not in {"claimed", "sending"}:
-            return DailyReportTransitionResponse(
-                ok=False,
-                status=row.status,
-                attempt_count=row.attempt_count,
-                next_attempt_at=row.next_attempt_at,
-            )
-        row.status = "sending"
-        row.next_attempt_at = None
+        allowed_statuses = ("claimed", "sending")
+        response_status = "sending"
+        response_next_attempt_at = None
+        values.update(status="sending", next_attempt_at=None)
     elif req.action == "sent":
-        if row.status not in {"sending", "sent"}:
-            return DailyReportTransitionResponse(
-                ok=False,
-                status=row.status,
-                attempt_count=row.attempt_count,
-                next_attempt_at=row.next_attempt_at,
-            )
-        row.status = "sent"
-        row.sent_at = row.sent_at or now
-        row.next_attempt_at = None
+        allowed_statuses = ("sending", "sent")
+        response_status = "sent"
+        response_next_attempt_at = None
+        values.update(status="sent", sent_at=row.sent_at or now, next_attempt_at=None)
         if req.message_id:
-            row.message_id = str(req.message_id)[:128]
+            values["message_id"] = str(req.message_id)[:128]
     elif req.action == "release":
-        if row.status != "claimed":
-            return DailyReportTransitionResponse(
-                ok=False,
-                status=row.status,
-                attempt_count=row.attempt_count,
-                next_attempt_at=row.next_attempt_at,
-            )
+        allowed_statuses = ("claimed",)
         retry_index = max(0, row.attempt_count - 1)
         deadline = _retry_deadline(row.date_str)
         if retry_index >= len(DAILY_REPORT_RETRY_DELAYS):
-            row.status = "failed"
-            row.next_attempt_at = None
+            response_status = "failed"
+            response_next_attempt_at = None
         else:
             next_attempt_at = now + DAILY_REPORT_RETRY_DELAYS[retry_index]
             if next_attempt_at >= deadline:
-                row.status = "failed"
-                row.next_attempt_at = None
+                response_status = "failed"
+                response_next_attempt_at = None
             else:
-                row.status = "pending"
-                row.next_attempt_at = next_attempt_at
-        _clear_claim(row)
+                response_status = "pending"
+                response_next_attempt_at = next_attempt_at
+        values.update(
+            status=response_status,
+            next_attempt_at=response_next_attempt_at,
+            claim_token=None,
+            claimed_at=None,
+            instance_id="",
+            delivery_bot_id="",
+        )
     elif req.action == "uncertain":
-        if row.status not in {"sending", "uncertain"}:
-            return DailyReportTransitionResponse(
-                ok=False,
-                status=row.status,
-                attempt_count=row.attempt_count,
-                next_attempt_at=row.next_attempt_at,
-            )
-        row.status = "uncertain"
-        row.next_attempt_at = None
+        allowed_statuses = ("sending", "uncertain")
+        response_status = "uncertain"
+        response_next_attempt_at = None
+        values.update(status="uncertain", next_attempt_at=None)
     else:
-        if row.status not in {"claimed", "skipped"}:
-            return DailyReportTransitionResponse(
-                ok=False,
-                status=row.status,
-                attempt_count=row.attempt_count,
-                next_attempt_at=row.next_attempt_at,
-            )
-        row.status = "skipped"
-        row.next_attempt_at = None
+        allowed_statuses = ("claimed", "skipped")
+        response_status = "skipped"
+        response_next_attempt_at = None
+        values.update(status="skipped", next_attempt_at=None)
 
-    row.last_error = str(req.error or "")[:512]
+    if row.status not in allowed_statuses:
+        return DailyReportTransitionResponse(
+            ok=False,
+            status=row.status,
+            attempt_count=row.attempt_count,
+            next_attempt_at=row.next_attempt_at,
+        )
+
+    result = session.execute(
+        update(DailyReportDelivery)
+        .where(
+            DailyReportDelivery.id == row.id,
+            DailyReportDelivery.claim_token == req.claim_token,
+            DailyReportDelivery.status.in_(allowed_statuses),
+            DailyReportDelivery.attempt_count == row.attempt_count,
+        )
+        .values(**values)
+        .execution_options(synchronize_session=False)
+    )
+    if result.rowcount != 1:
+        # SQLite 无行锁时可能在读取后发生租约重领；重新读取赢家状态并明确拒绝旧 Token。
+        session.rollback()
+        current = session.execute(
+            select(DailyReportDelivery).where(
+                DailyReportDelivery.date_str == req.date_str,
+                DailyReportDelivery.group_id == req.group_id,
+            )
+        ).scalar_one_or_none()
+        if current is None:
+            return DailyReportTransitionResponse(ok=False)
+        return DailyReportTransitionResponse(
+            ok=False,
+            status=current.status,
+            attempt_count=current.attempt_count,
+            next_attempt_at=current.next_attempt_at,
+        )
+
     session.commit()
     return DailyReportTransitionResponse(
         ok=True,
-        status=row.status,
+        status=response_status,
         attempt_count=row.attempt_count,
-        next_attempt_at=row.next_attempt_at,
+        next_attempt_at=response_next_attempt_at,
     )

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from sqlalchemy import create_engine
-from sqlalchemy.engine import make_url
+import datetime as dt
+
+from sqlalchemy import create_engine, func
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from sqlalchemy.sql.elements import ColumnElement
 
 from .config import settings
 
@@ -11,22 +13,26 @@ class Base(DeclarativeBase):
     pass
 
 
-def _engine_connect_args(database_url: str) -> dict[str, str]:
-    """为 MySQL 会话固定 UTC，保证服务端时间戳与 UTC naive 截止点口径一致。"""
-
-    if make_url(database_url).get_backend_name() == "mysql":
-        # 使用数值偏移不依赖 MySQL 时区表，PyMySQL 会在每条新连接建立时执行。
-        return {"init_command": "SET time_zone = '+00:00'"}
-    return {}
-
-
-engine = create_engine(
-    settings.database_url,
-    pool_pre_ping=True,
-    future=True,
-    connect_args=_engine_connect_args(settings.database_url),
-)
+engine = create_engine(settings.database_url, pool_pre_ping=True, future=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False, class_=Session)
+
+
+def database_cutoff_value(
+    session: Session,
+    value: dt.datetime,
+) -> dt.datetime | ColumnElement[dt.datetime]:
+    """把固定截止点转换为当前后端既有 DateTime 存储口径。"""
+
+    if value.tzinfo is None:
+        # 保持旧接口约定：无时区值由调用方按数据库本地时间负责解释。
+        return value
+    utc_value = value.astimezone(dt.timezone.utc)
+    if session.get_bind().dialect.name == "mysql":
+        # 历史 MySQL DATETIME 使用部署原有会话时区。FROM_UNIXTIME 会在数据库端按
+        # 同一会话时区还原墙上时间，不修改旧数据，也不要求部署者迁移时区。
+        return func.from_unixtime(utc_value.timestamp())
+    # SQLite CURRENT_TIMESTAMP 固定使用 UTC，继续沿用原来的 UTC-naive 比较口径。
+    return utc_value.replace(tzinfo=None)
 
 
 def get_session():

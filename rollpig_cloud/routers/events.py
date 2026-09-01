@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from ..auth import verify_token
 from ..config import ApiKeyIdentity
-from ..db import get_session
+from ..db import database_cutoff_value, get_session
 from ..models import RoastEvent
 from ..schemas import EventCreateRequest, EventItem, EventListResponse
 from ..services.events import record_roast_event_with_status
@@ -47,12 +47,7 @@ def list_events(
     if group_id:
         stmt = stmt.where(RoastEvent.group_id == group_id)
     if cutoff_at is not None:
-        # 数据库存储 UTC naive 时间；API 允许客户端提交带时区的固定日报截止点。
-        normalized_cutoff = (
-            cutoff_at.astimezone(dt.timezone.utc).replace(tzinfo=None)
-            if cutoff_at.tzinfo is not None
-            else cutoff_at
-        )
+        normalized_cutoff = database_cutoff_value(session, cutoff_at)
         stmt = stmt.where(RoastEvent.created_at <= normalized_cutoff)
     stmt = stmt.order_by(RoastEvent.created_at.asc(), RoastEvent.id.asc())
     rows = session.execute(stmt).scalars().all()

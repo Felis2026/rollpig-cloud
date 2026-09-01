@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from ..auth import verify_token
 from ..config import ApiKeyIdentity
-from ..db import get_session
+from ..db import database_cutoff_value, get_session
 from ..models import GroupRoll
 from ..schemas import GroupRollItem, GroupRollListResponse, GroupRollMarkSeenRequest
 from ..services.roast_refills import mark_group_active_users
@@ -63,11 +63,7 @@ def get_group_rolls(
         GroupRoll.date_str == date_str,
     )
     if cutoff_at is not None:
-        normalized_cutoff = (
-            cutoff_at.astimezone(dt.timezone.utc).replace(tzinfo=None)
-            if cutoff_at.tzinfo is not None
-            else cutoff_at
-        )
+        normalized_cutoff = database_cutoff_value(session, cutoff_at)
         stmt = stmt.where(GroupRoll.seen_at <= normalized_cutoff)
     rows = session.execute(stmt).scalars().all()
     return GroupRollListResponse(items=[GroupRollItem(user_id=row.user_id, pig_id=row.pig_id) for row in rows])
