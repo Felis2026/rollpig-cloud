@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "rollpig-cloud"
-version = "0.6.0"
+version = "0.6.1"
 description = "Cloud storage service for nonebot-plugin-rollpig"
 authors = ["Felis"]
 readme = "README.md"
