@@ -23,7 +23,9 @@ from .usage import clamp_charge_settings
 
 ROAST_REFILL_TTL_SECONDS = 10 * 60
 ROAST_REFILL_THRESHOLD_POLICY = "capped-v1"
+ROAST_REFILL_VOTE_WEIGHT_POLICY = "group-manager-double-v1"
 ROAST_REFILL_THRESHOLD_STEPS = ((25, 8), (35, 12), (45, 16), (55, 20))
+ROAST_REFILL_MIN_DISTINCT_VOTERS = 2
 LEGACY_ROAST_REFILL_RATIOS = (25, 35, 45, 55, 65)
 
 
@@ -232,6 +234,11 @@ def prepare_refill(session: Session, req: GroupRoastRefillPrepareRequest) -> Gro
 
     now = _utc_from_ts(req.now_ts)
     active_key = _active_key(req.date_str, req.group_id)
+    vote_weight_policy = (
+        ROAST_REFILL_VOTE_WEIGHT_POLICY
+        if req.vote_weight_policy == ROAST_REFILL_VOTE_WEIGHT_POLICY
+        else ""
+    )
     existing = session.execute(
         select(GroupRoastRefillRequest)
         .where(GroupRoastRefillRequest.active_key == active_key)
@@ -241,13 +248,23 @@ def prepare_refill(session: Session, req: GroupRoastRefillPrepareRequest) -> Gro
         if _expire_if_needed(existing, now):
             session.flush()
         if existing.status == "voting":
-            return GroupRoastRefillPrepareResponse(status="existing", request=refill_to_schema(existing))
+            return GroupRoastRefillPrepareResponse(
+                status="existing",
+                request=refill_to_schema(existing),
+                vote_weight_policy=vote_weight_policy,
+            )
 
     active_user_ids = get_group_active_user_ids(session, req.date_str, req.group_id)
+    if req.eligible_user_ids is not None:
+        # 群成员名单只能由连接 QQ 的 Plus 获取；Cloud 再与服务端日活求交集，
+        # 防止退群账号继续抬高门槛或在成功后得到全局次数补充。
+        eligible_user_ids = {str(user_id) for user_id in req.eligible_user_ids if user_id}
+        active_user_ids = sorted(set(active_user_ids) & eligible_user_ids)
     if len(active_user_ids) < 3:
         return GroupRoastRefillPrepareResponse(
             status="insufficient_active",
             active_user_ids=active_user_ids,
+            vote_weight_policy=vote_weight_policy,
         )
 
     success_count = int(
@@ -292,6 +309,7 @@ def prepare_refill(session: Session, req: GroupRoastRefillPrepareRequest) -> Gro
         status="created",
         request=refill_to_schema(row),
         active_user_ids=active_user_ids,
+        vote_weight_policy=vote_weight_policy,
     )
 
 
@@ -369,6 +387,8 @@ def complete_refill(
     message_id: str,
     voter_ids: list[str],
     excluded_user_ids: list[str],
+    manager_voter_ids: list[str] | None = None,
+    vote_weight_policy: str = "",
     max_charges: int = 2,
     now_ts: float | None = None,
 ) -> GroupRoastRefillCompleteResponse:
@@ -404,12 +424,25 @@ def complete_refill(
     active_user_ids = set(get_group_active_user_ids(session, row.date_str, row.group_id))
     excluded = {str(user_id) for user_id in excluded_user_ids if user_id}
     valid_voters = sorted(({str(user_id) for user_id in voter_ids if user_id} & active_user_ids) - excluded)
-    if len(valid_voters) < row.required_votes:
+    valid_voter_set = set(valid_voters)
+    valid_manager_voters = (
+        valid_voter_set
+        & {str(user_id) for user_id in (manager_voter_ids or []) if user_id}
+        if vote_weight_policy == ROAST_REFILL_VOTE_WEIGHT_POLICY
+        else set()
+    )
+    effective_votes = len(valid_voters) + len(valid_manager_voters)
+    # 管理员额外一票不能绕过集体表决：任何规模都至少需要两名独立支持者。
+    if (
+        len(valid_voters) < ROAST_REFILL_MIN_DISTINCT_VOTERS
+        or effective_votes < row.required_votes
+    ):
         return GroupRoastRefillCompleteResponse(
             completed=False,
             status="pending",
             request=refill_to_schema(row),
             valid_voter_ids=valid_voters,
+            effective_votes=effective_votes,
         )
 
     benefited = sorted(active_user_ids - excluded)
@@ -433,4 +466,5 @@ def complete_refill(
         request=refill_to_schema(row),
         valid_voter_ids=valid_voters,
         benefited_user_ids=benefited,
+        effective_votes=effective_votes,
     )

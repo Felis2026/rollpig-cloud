@@ -22,6 +22,7 @@ from rollpig_cloud.models import (
 from rollpig_cloud.schemas import GroupRoastRefillPrepareRequest
 from rollpig_cloud.services.roast_refills import (
     ROAST_REFILL_THRESHOLD_POLICY,
+    ROAST_REFILL_VOTE_WEIGHT_POLICY,
     bind_refill_message,
     complete_refill,
     get_active_refill,
@@ -60,6 +61,7 @@ class CloudRoastRefillTests(unittest.TestCase):
         group_id: str = "100",
         now_ts: float = NOW_TS,
         threshold_policy: str | None = ROAST_REFILL_THRESHOLD_POLICY,
+        eligible_user_ids: list[str] | None = None,
     ):
         request_data = {
             "group_id": group_id,
@@ -68,9 +70,12 @@ class CloudRoastRefillTests(unittest.TestCase):
             "delivery_bot_id": "bot",
             "date_str": DATE,
             "now_ts": now_ts,
+            "vote_weight_policy": ROAST_REFILL_VOTE_WEIGHT_POLICY,
         }
         if threshold_policy is not None:
             request_data["threshold_policy"] = threshold_policy
+        if eligible_user_ids is not None:
+            request_data["eligible_user_ids"] = eligible_user_ids
         response = prepare_refill(
             self.session,
             GroupRoastRefillPrepareRequest(**request_data),
@@ -102,6 +107,8 @@ class CloudRoastRefillTests(unittest.TestCase):
             (40, 25, 10),
         )
         self.assertEqual(legacy_refill_threshold(100, 99), (65, 65))
+        self.assertEqual(capped.vote_weight_policy, ROAST_REFILL_VOTE_WEIGHT_POLICY)
+        self.assertEqual(created.vote_weight_policy, ROAST_REFILL_VOTE_WEIGHT_POLICY)
 
     def test_prepare_freezes_snapshot_and_keeps_one_active_request(self):
         self._mark("100", "a", "b")
@@ -115,6 +122,18 @@ class CloudRoastRefillTests(unittest.TestCase):
         self._mark("100", "late")
         current = get_active_refill(self.session, date_str=DATE, group_id="100", now_ts=NOW_TS + 30)
         self.assertEqual((current.active_count_snapshot, current.required_votes), (10, 3))
+
+    def test_prepare_filters_daily_active_snapshot_by_current_group_members(self):
+        self._mark("100", "a", "b", "c", "left")
+
+        created = self._prepare("100", eligible_user_ids=["a", "b", "c"])
+
+        self.assertEqual(created.status, "created")
+        self.assertEqual(created.active_user_ids, ["a", "b", "c"])
+        self.assertEqual(
+            (created.request.active_count_snapshot, created.request.required_votes),
+            (3, 2),
+        )
 
     def test_complete_is_atomic_resets_latest_active_users_and_advances_ratio(self):
         self._mark("100", "a", "b", "c", "d", "e", "bot")
@@ -168,6 +187,55 @@ class CloudRoastRefillTests(unittest.TestCase):
 
         next_round = self._prepare(now_ts=NOW_TS + 62)
         self.assertEqual((next_round.request.success_count_before, next_round.request.required_ratio), (1, 35))
+
+    def test_manager_vote_counts_twice_but_cannot_pass_alone(self):
+        self._mark("100", "admin", "member", "c", "d", "e", "f", "g", "h", "i", "j")
+        created = self._prepare()
+        row = bind_refill_message(
+            self.session,
+            request_id=created.request.request_id,
+            message_id="message-1",
+            now_ts=NOW_TS,
+        )
+        self.session.commit()
+
+        alone = complete_refill(
+            self.session,
+            request_id=row.request_id,
+            message_id="message-1",
+            voter_ids=["admin"],
+            manager_voter_ids=["admin"],
+            vote_weight_policy=ROAST_REFILL_VOTE_WEIGHT_POLICY,
+            excluded_user_ids=[],
+            now_ts=NOW_TS + 30,
+        )
+        self.session.commit()
+        without_policy = complete_refill(
+            self.session,
+            request_id=row.request_id,
+            message_id="message-1",
+            voter_ids=["admin", "member"],
+            manager_voter_ids=["admin", "not-a-voter"],
+            excluded_user_ids=[],
+            now_ts=NOW_TS + 60,
+        )
+        self.session.commit()
+        completed = complete_refill(
+            self.session,
+            request_id=row.request_id,
+            message_id="message-1",
+            voter_ids=["admin", "member"],
+            manager_voter_ids=["admin", "not-a-voter"],
+            vote_weight_policy=ROAST_REFILL_VOTE_WEIGHT_POLICY,
+            excluded_user_ids=[],
+            now_ts=NOW_TS + 90,
+        )
+        self.session.commit()
+
+        self.assertEqual((alone.completed, alone.effective_votes), (False, 2))
+        self.assertEqual((without_policy.completed, without_policy.effective_votes), (False, 2))
+        self.assertEqual((completed.completed, completed.effective_votes), (True, 3))
+        self.assertEqual(set(completed.valid_voter_ids), {"admin", "member"})
 
     def test_complete_rejects_request_without_bound_poll_message(self):
         self._mark("100", "a", "b", "c", "d", "e")
@@ -293,7 +361,7 @@ class CloudRoastRefillTests(unittest.TestCase):
         self.assertFalse(active)
 
     def test_application_exposes_all_refill_routes(self):
-        self.assertEqual(app.version, "0.6.0")
+        self.assertEqual(app.version, "0.6.1")
         paths = set(app.openapi()["paths"])
         self.assertTrue({
             "/v1/group-roast-refills/active-users/mark",

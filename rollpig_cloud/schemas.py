@@ -459,14 +459,17 @@ class GroupRoastRefillPrepareRequest(BaseModel):
     initiator_name: str = ""
     delivery_bot_id: str
     date_str: dt.date
+    eligible_user_ids: list[str] | None = None
     now_ts: float | None = None
     threshold_policy: str = ""
+    vote_weight_policy: str = ""
 
 
 class GroupRoastRefillPrepareResponse(BaseModel):
     status: str
     request: GroupRoastRefillItem | None = None
     active_user_ids: list[str] = Field(default_factory=list)
+    vote_weight_policy: str = ""
 
 
 class GroupRoastRefillBindRequest(BaseModel):
@@ -488,6 +491,8 @@ class GroupRoastRefillCompleteRequest(BaseModel):
     request_id: str
     message_id: str
     voter_ids: list[str] = Field(default_factory=list)
+    manager_voter_ids: list[str] = Field(default_factory=list)
+    vote_weight_policy: str = ""
     excluded_user_ids: list[str] = Field(default_factory=list)
     max_charges: int = 2
     now_ts: float | None = None
@@ -499,3 +504,4 @@ class GroupRoastRefillCompleteResponse(BaseModel):
     request: GroupRoastRefillItem | None = None
     valid_voter_ids: list[str] = Field(default_factory=list)
     benefited_user_ids: list[str] = Field(default_factory=list)
+    effective_votes: int = 0
