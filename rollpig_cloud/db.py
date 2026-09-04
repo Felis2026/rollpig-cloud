@@ -6,7 +6,7 @@ from sqlalchemy import create_engine, func
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.sql.elements import ColumnElement
 
-from .config import settings
+from .config import ROLLPIG_TIMEZONE, settings
 
 
 class Base(DeclarativeBase):
@@ -33,6 +33,18 @@ def database_cutoff_value(
         return func.from_unixtime(utc_value.timestamp())
     # SQLite CURRENT_TIMESTAMP 固定使用 UTC，继续沿用原来的 UTC-naive 比较口径。
     return utc_value.replace(tzinfo=None)
+
+
+def database_datetime_for_response(session: Session, value: dt.datetime) -> dt.datetime:
+    """按当前数据库的存储口径为响应时间补充明确时区。"""
+
+    if value.tzinfo is not None:
+        return value
+    if session.get_bind().dialect.name == "mysql":
+        # 生产 MySQL DATETIME 由数据库会话按 RollPig 业务时区写入和读取。
+        return value.replace(tzinfo=ROLLPIG_TIMEZONE)
+    # SQLite CURRENT_TIMESTAMP 使用 UTC，测试与本地部署继续按 UTC 解释。
+    return value.replace(tzinfo=dt.timezone.utc)
 
 
 def get_session():

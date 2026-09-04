@@ -18,7 +18,11 @@ os.environ.setdefault("ROLLPIG_CLOUD_DATABASE_URL", "sqlite+pysqlite:///:memory:
 
 from rollpig_cloud import db as cloud_db
 from rollpig_cloud.config import ApiKeyIdentity, ROLLPIG_TIMEZONE
-from rollpig_cloud.db import Base, database_cutoff_value
+from rollpig_cloud.db import (
+    Base,
+    database_cutoff_value,
+    database_datetime_for_response,
+)
 from rollpig_cloud.migrations import ensure_runtime_migrations
 from rollpig_cloud.models import (
     Collection,
@@ -47,6 +51,7 @@ from rollpig_cloud.schemas import (
     DailyReportDeliveryCandidate,
     DailyReportProfileRequest,
     DailyReportTransitionRequest,
+    EventItem,
     GroupRollMarkSeenRequest,
 )
 
@@ -642,6 +647,36 @@ class DailyReportMigrationTests(unittest.TestCase):
         self.assertEqual(sqlite_cutoff, dt.datetime(2026, 8, 30, 15, 45))
         self.assertIs(database_cutoff_value(mysql_session, naive_cutoff), naive_cutoff)
 
+    def test_response_datetime_exposes_database_time_basis(self) -> None:
+        mysql_session = SimpleNamespace(
+            get_bind=lambda: SimpleNamespace(
+                dialect=SimpleNamespace(name="mysql")
+            )
+        )
+        sqlite_session = SimpleNamespace(
+            get_bind=lambda: SimpleNamespace(
+                dialect=SimpleNamespace(name="sqlite")
+            )
+        )
+        naive_value = dt.datetime(2026, 9, 3, 19, 56, 32)
+
+        mysql_value = database_datetime_for_response(mysql_session, naive_value)
+        self.assertEqual(
+            mysql_value.isoformat(),
+            "2026-09-03T19:56:32+08:00",
+        )
+        self.assertEqual(
+            database_datetime_for_response(sqlite_session, naive_value).isoformat(),
+            "2026-09-03T19:56:32+00:00",
+        )
+        payload = EventItem(
+            created_at=mysql_value,
+            type="success",
+            attacker="attacker",
+            target="target",
+        ).model_dump(mode="json")
+        self.assertEqual(payload["created_at"], "2026-09-03T19:56:32+08:00")
+
     def test_runtime_migration_adds_retry_columns_idempotently(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             database_path = Path(temp_dir) / "legacy-daily-reports.sqlite3"
@@ -865,6 +900,7 @@ class DailyReportCutoffQueryTests(unittest.TestCase):
         active = list_active_users("100", DATE, cutoff_at=CUTOFF, session=self.session)
 
         self.assertEqual([item.attacker for item in events.items], ["before"])
+        self.assertEqual(events.items[0].created_at.tzinfo, dt.timezone.utc)
         self.assertEqual([item.user_id for item in rolls.items], ["before"])
         self.assertEqual(active.user_ids, ["before"])
 

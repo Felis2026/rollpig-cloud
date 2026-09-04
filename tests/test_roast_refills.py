@@ -361,7 +361,7 @@ class CloudRoastRefillTests(unittest.TestCase):
         self.assertFalse(active)
 
     def test_application_exposes_all_refill_routes(self):
-        self.assertEqual(app.version, "0.6.1")
+        self.assertEqual(app.version, "0.6.2")
         paths = set(app.openapi()["paths"])
         self.assertTrue({
             "/v1/group-roast-refills/active-users/mark",

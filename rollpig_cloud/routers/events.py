@@ -8,7 +8,11 @@ from sqlalchemy.orm import Session
 
 from ..auth import verify_token
 from ..config import ApiKeyIdentity
-from ..db import database_cutoff_value, get_session
+from ..db import (
+    database_cutoff_value,
+    database_datetime_for_response,
+    get_session,
+)
 from ..models import RoastEvent
 from ..schemas import EventCreateRequest, EventItem, EventListResponse
 from ..services.events import record_roast_event_with_status
@@ -67,7 +71,7 @@ def list_events(
         items=[
             EventItem(
                 event_id=str(row.id),
-                created_at=row.created_at,
+                created_at=database_datetime_for_response(session, row.created_at),
                 type=row.event_type,
                 attacker=row.attacker_id,
                 target=row.target_id,

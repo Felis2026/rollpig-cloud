@@ -366,7 +366,12 @@ class CloudEventQueryTests(unittest.TestCase):
 
         self.assertEqual([item.reservation_id for item in response.items], ["reservation-a", "reservation-b"])
         self.assertEqual([item.event_id for item in response.items], ["2", "3"])
-        self.assertTrue(all(item.created_at == earlier for item in response.items))
+        self.assertTrue(
+            all(
+                item.created_at == earlier.replace(tzinfo=dt.timezone.utc)
+                for item in response.items
+            )
+        )
 
     def test_non_reservation_special_reason_round_trips_without_fake_participants(self):
         record_roast_event(
