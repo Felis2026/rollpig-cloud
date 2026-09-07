@@ -48,6 +48,7 @@
 
 | 客户端 | 推荐组合 | 说明 |
 | --- | --- | --- |
+| RollPig Plus `0.14.0+` | Cloud `0.7.0+` | 普通烤群友成功与普通预约成功可触发每日一次加餐，跨群、跨 Bot 原子结算。 |
 | RollPig Plus `0.13.1+` | Cloud `0.6.1+` | 烤箱补货支持活跃用户发起、群主与管理员双票，并保留至少两名独立支持者。 |
 | 支持“猪圈日报”的 RollPig Plus | Cloud `0.6.2+` | 支持固定截止点资料聚合、跨实例唯一领取、发送状态恢复与带时区的事件时间。 |
 | 支持新版“昨日小猪”的 RollPig Plus | Cloud `0.5.0+` | 完整保存每日抽取成长、资源版本与 EX 外观快照，并支持按用户查询昨日相关事件。 |
@@ -55,7 +56,7 @@
 | RollPig Plus 旧版本 | Cloud `0.5.0+` | 既有请求与响应字段继续保留；客户端不使用的新接口不会影响旧玩法。 |
 | 上游原版 RollPig | 不需要 Cloud | 原版可直接读取静态资源，不使用 Cloud 的 `/v1` 状态接口。 |
 
-Cloud `0.6.1` 可以先于客户端升级：旧版 Plus 不提交群管理名单，补货继续按一人一票结算；新版 Plus 连接旧 Cloud 时也能继续补货，但不会启用群管理双票。支持日报的 Plus 连接 Cloud `0.5.x` 时只会停用猪圈日报，其他玩法不受影响。
+Cloud `0.7.0` 可以先于客户端升级：旧版 Plus 不请求加餐，不会改变既有抽猪与烧烤结果。Plus `0.14.0+` 连接旧 Cloud 时，原有玩法继续工作，但加餐保持静默且不会回退本地。Cloud `0.6.1` 的补货双票兼容规则与 Cloud `0.6.2` 的日报协同规则继续不变。
 
 Cloud 只保存服务端数据；替换 Cloud 容器或代码不会删除 MySQL 数据，但删除数据库、切换租户 ID 或清理数据库卷都会影响已有成长记录。正式升级前请先备份数据库。
 
@@ -234,7 +235,7 @@ docker run -d \
 | --- | --- | --- |
 | `POST` | `/v1/group-rolls/mark-seen` | 标记群内已见过某只小猪 |
 | `GET` | `/v1/group-rolls` | 查询群内小猪记录 |
-| `POST` | `/v1/events` | 写入抽猪、烤猪等事件 |
+| `POST` | `/v1/events` | 写入抽猪、烤猪等事件，并可原子结算普通烧烤加餐 |
 | `GET` | `/v1/events` | 按日期、群或用户查询有序事件列表 |
 | `GET` | `/v1/groups/active` | 查询有活动记录的群列表 |
 | `POST` | `/v1/daily-reports/profiles` | 按固定截止点批量读取日报排行资料 |
@@ -258,7 +259,7 @@ docker run -d \
 | `POST` | `/v1/roast-reservations/prepare` | 原子检查目标、群保护、预约状态并消费创建资源或免费加入 |
 | `GET` | `/v1/roast-reservations/owned` | 查询指定 Bot 当天是否持有未完成预约 |
 | `POST` | `/v1/roast-reservations/claim` | 原子领取可投递预约，并在同一响应返回当前 Bot 是否仍持有未完成预约 |
-| `POST` | `/v1/roast-reservations/outcome/prepare` | 幂等保存固定结果并进入可安全重领的 `prepared` |
+| `POST` | `/v1/roast-reservations/outcome/prepare` | 幂等保存固定结果、结算普通预约参与者加餐并进入可安全重领的 `prepared` |
 | `POST` | `/v1/roast-reservations/sending` | 幂等提交发送意图；进入后不再自动释放或重领 |
 | `POST` | `/v1/roast-reservations/outcome` | 兼容旧 Plus：保存固定结果并直接进入 `sending` |
 | `POST` | `/v1/roast-reservations/complete` | 幂等完成已发送预约 |
@@ -293,7 +294,7 @@ poetry run python tools/backfill_p1a_progress.py
 poetry run python tools/migrate_roast_charges.py
 ```
 
-服务启动时也会执行轻量运行期迁移：自动为旧 `user_usage` 表补齐充能列，并通过 SQLAlchemy `create_all` 新建预约、群日活、烤箱补货与日报投递状态表；群日活表首次创建时只回填上海业务日期的今天与昨天，避免后续启动重复扫描全部历史记录。Cloud `0.5.0` 会为旧 `daily_rolls` 表幂等增加抽取结果与外观快照列；历史行保持为空，不会使用当前成长状态反向伪造过去的抽取结果。本次预约可靠性更新还会执行一次幂等、非破坏性的数据状态修复：旧版 `processing + outcome_snapshot` 记录统一冻结为 `sending`，避免升级后把一条可能已经发出的群消息自动重发。
+服务启动时也会执行轻量运行期迁移：自动为旧 `user_usage` 表补齐充能列，并通过 SQLAlchemy `create_all` 新建预约、群日活、烤箱补货、日报投递与每日加餐状态表；群日活表首次创建时只回填上海业务日期的今天与昨天，避免后续启动重复扫描全部历史记录。Cloud `0.5.0` 会为旧 `daily_rolls` 表幂等增加抽取结果与外观快照列；Cloud `0.7.0` 继续补齐抽取时 EX 快照、每只猪的加餐成长量及预约加餐结果。历史行保持兼容默认值，不改写真实抽取次数，也不会反向补发过去的加餐。
 
 日报投递按 `date_str + group_id` 保持唯一。发送前失败会按 Cloud 返回的退避时间重新领取；进入 `sending` 后不再自动重领，避免消息结果不确定时重复向群内发送日报。
 

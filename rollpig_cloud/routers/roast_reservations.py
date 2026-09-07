@@ -25,6 +25,7 @@ from ..schemas import (
     UnrolledRoastAttemptResponse,
 )
 from ..services.events import bind_reservation_event, record_roast_event
+from ..services.progress import apply_daily_feed
 from ..services.reservations import activate_if_target_already_rolled, prepare_reservation, reservation_to_schema
 
 
@@ -171,6 +172,36 @@ def prepare_outcome(req: RoastReservationOutcomeRequest, session: Session = Depe
         if row.status != "processing":
             return RoastReservationMutationResponse(ok=False)
         row.outcome_snapshot = req.outcome_snapshot
+        # ================================ 预约加餐结算 ================================ #
+        # 只有新客户端明确声明、普通预约且结果成功时结算。结果与预约快照在同一
+        # 事务中固化，重领时只读取已保存结果，不会重复成长或改变群内提示。
+        if (
+            req.settle_daily_feed
+            and row.force_mode is None
+            and str(req.outcome_snapshot.get("event_type") or "") == "success"
+        ):
+            reservation_item = reservation_to_schema(session, row)
+            # 多场预约可能共享参与者；统一按 user_id 获取用户行锁，避免两场事务
+            # 以相反参与顺序结算时形成死锁。最终结果仍按原参与顺序固化和展示。
+            feed_results_by_user = {
+                participant.user_id: apply_daily_feed(
+                    session,
+                    date_str=row.date_str,
+                    user_id=participant.user_id,
+                    source_type="reservation",
+                    source_id=row.reservation_id,
+                )
+                for participant in sorted(
+                    reservation_item.participants,
+                    key=lambda item: item.user_id,
+                )
+            }
+            row.daily_feed_results = [
+                feed_results_by_user[participant.user_id].model_dump(mode="json")
+                for participant in reservation_item.participants
+            ]
+        else:
+            row.daily_feed_results = []
     elif row.outcome_snapshot != req.outcome_snapshot:
         # 相同 token 出现不同随机结果代表客户端状态已分叉，不能静默覆盖或假成功。
         return RoastReservationMutationResponse(ok=False)

@@ -22,6 +22,8 @@ class DailyRoll(Base):
     is_new_pig: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     previous_copies: Mapped[int | None] = mapped_column(Integer, nullable=True)
     copies_after_roll: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    previous_expert_level: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    expert_level_after_roll: Mapped[int | None] = mapped_column(Integer, nullable=True)
     collection_size_after_roll: Mapped[int | None] = mapped_column(Integer, nullable=True)
     previous_duplicate_streak: Mapped[int | None] = mapped_column(Integer, nullable=True)
     duplicate_streak_after_roll: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -70,8 +72,29 @@ class UserPigProgress(Base):
     user_id: Mapped[str] = mapped_column(String(64), nullable=False)
     pig_id: Mapped[str] = mapped_column(String(128), nullable=False)
     copies: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    growth_bonus: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     first_obtained_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+# ================================ 每日加餐记录 ================================ #
+# 日期与用户唯一，确保多群、多 Bot 同时结算时每天只会真正成长一次。
+class UserDailyFeed(Base):
+    __tablename__ = "user_daily_feeds"
+    __table_args__ = (
+        UniqueConstraint("date_str", "user_id", name="uq_user_daily_feed_date_user"),
+        Index("ix_user_daily_feeds_date", "date_str"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    date_str: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    pig_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    previous_level: Mapped[int] = mapped_column(Integer, nullable=False)
+    new_level: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
 
 class UserDrawState(Base):
@@ -204,6 +227,7 @@ class RoastReservation(Base):
     force_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
     outcome_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    daily_feed_results: Mapped[list | None] = mapped_column(JSON, nullable=True)
     claim_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
     ready_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)

@@ -7,27 +7,42 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..auth import verify_token
-from ..config import ApiKeyIdentity
+from ..config import ApiKeyIdentity, rollpig_today
 from ..db import (
     database_cutoff_value,
     database_datetime_for_response,
     get_session,
 )
 from ..models import RoastEvent
-from ..schemas import EventCreateRequest, EventItem, EventListResponse
+from ..schemas import EventCreateRequest, EventCreateResponse, EventItem, EventListResponse
 from ..services.events import record_roast_event_with_status
 from ..services.key_usage import record_key_mutation_outcome
+from ..services.progress import apply_daily_feed
 
 router = APIRouter(prefix="/v1/events", tags=["events"], dependencies=[Depends(verify_token)])
 
 
-@router.post("")
+@router.post("", response_model=EventCreateResponse)
 def create_event(
     req: EventCreateRequest,
     session: Session = Depends(get_session),
     identity: ApiKeyIdentity = Depends(verify_token),
 ):
     _recorded, created = record_roast_event_with_status(session, req)
+    daily_feed_result = None
+    if (
+        req.settle_daily_feed
+        and req.source_id
+        and req.event_type == "success"
+        and not req.reservation_id
+    ):
+        daily_feed_result = apply_daily_feed(
+            session,
+            date_str=req.date_str or rollpig_today(),
+            user_id=req.attacker_id,
+            source_type="roast",
+            source_id=req.source_id,
+        )
     record_key_mutation_outcome(
         session,
         identity,
@@ -36,7 +51,7 @@ def create_event(
         idempotent_hits=int(not created),
     )
     session.commit()
-    return {"ok": True}
+    return EventCreateResponse(ok=True, daily_feed_result=daily_feed_result)
 
 
 @router.get("", response_model=EventListResponse)

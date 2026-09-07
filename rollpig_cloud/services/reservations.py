@@ -51,6 +51,7 @@ def reservation_to_schema(session: Session, reservation: RoastReservation) -> Ro
         force_mode=reservation.force_mode,
         status=reservation.status,
         outcome_snapshot=reservation.outcome_snapshot,
+        daily_feed_results=reservation.daily_feed_results or [],
         claim_token=reservation.claim_token or "",
     )
 

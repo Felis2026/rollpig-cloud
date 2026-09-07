@@ -217,6 +217,8 @@ def ensure_runtime_migrations(
             "is_new_pig": "BOOLEAN NULL",
             "previous_copies": "INTEGER NULL",
             "copies_after_roll": "INTEGER NULL",
+            "previous_expert_level": "INTEGER NULL",
+            "expert_level_after_roll": "INTEGER NULL",
             "collection_size_after_roll": "INTEGER NULL",
             "previous_duplicate_streak": "INTEGER NULL",
             "duplicate_streak_after_roll": "INTEGER NULL",
@@ -231,6 +233,14 @@ def ensure_runtime_migrations(
         _add_column_if_missing(engine, "user_usage", "roast_charge_updated_ts", "BIGINT NULL")
         _migrate_existing_user_usage(engine)
 
+    if "user_pig_progress" in table_names:
+        _add_column_if_missing(
+            engine,
+            "user_pig_progress",
+            "growth_bonus",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+
     if "roast_events" in table_names:
         _add_column_if_missing(
             engine,
@@ -242,6 +252,12 @@ def ensure_runtime_migrations(
 
     if "roast_reservations" in table_names:
         _migrate_ambiguous_roast_reservations(engine)
+        _add_column_if_missing(
+            engine,
+            "roast_reservations",
+            "daily_feed_results",
+            "JSON NULL",
+        )
 
     if "daily_report_deliveries" in table_names:
         # 领取次数与下次可领取时间是安全重试的持久化依据；已有记录从零次开始，

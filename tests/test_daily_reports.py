@@ -33,6 +33,7 @@ from rollpig_cloud.models import (
     RoastEvent,
     RoastReservation,
     RoastReservationParticipant,
+    UserDailyFeed,
 )
 from rollpig_cloud.routers.daily_reports import (
     DAILY_REPORT_CLAIM_TIMEOUT,
@@ -576,6 +577,26 @@ class DailyReportProfileTests(unittest.TestCase):
                 Collection(user_id="daily", pig_id="pig-daily", first_seen_at=before),
                 Collection(user_id="daily", pig_id="pig-after", first_seen_at=after),
                 Collection(user_id="recent", pig_id="pig-recent", first_seen_at=before - dt.timedelta(days=1)),
+                UserDailyFeed(
+                    date_str=DATE,
+                    user_id="daily",
+                    pig_id="pig-daily",
+                    source_type="roast",
+                    source_id="event-daily",
+                    previous_level=3,
+                    new_level=4,
+                    created_at=before + dt.timedelta(seconds=30),
+                ),
+                UserDailyFeed(
+                    date_str=DATE - dt.timedelta(days=1),
+                    user_id="recent",
+                    pig_id="pig-recent",
+                    source_type="roast",
+                    source_id="event-recent",
+                    previous_level=1,
+                    new_level=2,
+                    created_at=before - dt.timedelta(days=1) + dt.timedelta(seconds=30),
+                ),
             ]
         )
         self.session.commit()
@@ -598,14 +619,56 @@ class DailyReportProfileTests(unittest.TestCase):
 
         self.assertEqual(list(profiles), ["daily", "late", "recent"])
         self.assertEqual(profiles["daily"].daily_pig_id, "pig-daily")
-        self.assertEqual(profiles["daily"].daily_ex_level, 3)
+        self.assertEqual(profiles["daily"].daily_ex_level, 4)
+        self.assertEqual(profiles["daily"].daily_achieved_at, dt.datetime(2026, 8, 30, 15, 44, 30))
         self.assertEqual(profiles["daily"].catalog_count, 2)
         self.assertEqual(profiles["daily"].recent_pig_id, "pig-daily")
         self.assertEqual(profiles["recent"].daily_pig_id, "")
         self.assertEqual(profiles["recent"].recent_pig_id, "pig-recent")
-        self.assertEqual(profiles["recent"].recent_ex_level, 1)
+        self.assertEqual(profiles["recent"].recent_ex_level, 2)
         self.assertEqual(profiles["late"].daily_pig_id, "")
         self.assertEqual(profiles["late"].catalog_count, 0)
+
+    # ================================ 加餐排行截止点回归 ================================ #
+
+    def test_feed_updates_achievement_only_when_it_raises_visible_level(self) -> None:
+        roll_time = dt.datetime(2026, 8, 30, 8)
+        before, cutoff, after = (dt.datetime(2026, 8, 30, 15, minute) for minute in (44, 45, 46))
+        cases = (
+            ("before", 0, 0, 1, before, DATE, "pig", 1, before),
+            ("at", 0, 0, 1, cutoff, DATE, "pig", 1, cutoff),
+            ("after", 0, 0, 1, after, DATE, "pig", 0, roll_time),
+            ("max", 5, 5, 5, before, DATE, "pig", 5, roll_time),
+            ("no-effect", 2, 0, 1, before, DATE, "pig", 2, roll_time),
+            ("bad-level", 0, 0, 6, before, DATE, "pig", 0, roll_time),
+            ("other-pig", 0, 0, 1, before, DATE, "other", 0, roll_time),
+            ("old-feed", 1, 0, 1, before - dt.timedelta(days=1), DATE - dt.timedelta(days=1), "pig", 1, roll_time),
+            ("old-feed-fallback", 1, 1, 2, before - dt.timedelta(days=1), DATE - dt.timedelta(days=1), "pig", 2, roll_time),
+            ("unknown-roll", None, 0, 1, before, DATE, "pig", None, roll_time),
+        )
+        for user, level, previous, new, feed_time, feed_date, pig, _, _ in cases:
+            self.session.add_all([
+                GroupRoll(date_str=DATE, group_id="100", user_id=user, pig_id="pig", seen_at=roll_time),
+                DailyRoll(
+                    date_str=DATE, user_id=user, pig_id="pig", created_at=roll_time,
+                    copies_after_roll=1 if level is not None else None, expert_level_after_roll=level,
+                ),
+                UserDailyFeed(
+                    date_str=feed_date, user_id=user, pig_id=pig, source_type="roast", source_id=user,
+                    previous_level=previous, new_level=new, created_at=feed_time,
+                ),
+            ])
+        self.session.commit()
+        response = get_daily_report_profiles(
+            DailyReportProfileRequest(
+                date_str=DATE, group_id="100", cutoff_at=CUTOFF, user_ids=[case[0] for case in cases],
+            ), self.session,
+        )
+        profiles = {item.user_id: item for item in response.items}
+        for case in cases:
+            with self.subTest(user=case[0]):
+                item = profiles[case[0]]
+                self.assertEqual((item.daily_ex_level, item.daily_achieved_at), case[-2:])
 
     def test_profiles_chunk_large_group_without_dropping_users(self) -> None:
         user_ids = [f"user-{index:04d}" for index in range(1200)]
