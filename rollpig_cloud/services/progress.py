@@ -4,7 +4,7 @@ import datetime as dt
 from dataclasses import dataclass
 
 from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -238,27 +238,17 @@ def apply_daily_feed(
         with session.begin_nested():
             session.add(feed_row)
             session.flush()
-    except (IntegrityError, OperationalError) as e:
-        # SQLite 在两个事务都完成读取后才开始写入时，会抛出 OperationalError: database is locked
-        # 而不是 IntegrityError。begin_nested() 的 SAVEPOINT 已自动回滚，无需手动 rollback。
-        # 查询现有记录以返回幂等结果。
+    except IntegrityError:
+        # 唯一键冲突才代表已有事务完成了当日加餐；数据库锁必须交给外层重跑
+        # 包含事件或预约结果在内的完整事务，不能在这里伪装成 already_fed。
         existing = session.execute(
             select(UserDailyFeed).where(
                 UserDailyFeed.date_str == date_str,
                 UserDailyFeed.user_id == user_id,
             )
         ).scalar_one_or_none()
-        # 如果是锁冲突且记录尚不存在，说明另一个事务还未提交，返回 already_fed 作为保守处理
         if existing is None:
-            return DailyFeedResult(
-                status="already_fed",
-                user_id=user_id,
-                pig_id=daily_roll.pig_id,
-                previous_level=previous_level,
-                new_level=previous_level,
-                source_type=source_type,
-                source_id=source_id,
-            )
+            raise
         same_source = existing.source_type == source_type and existing.source_id == source_id
         return DailyFeedResult(
             status="fed" if same_source else "already_fed",

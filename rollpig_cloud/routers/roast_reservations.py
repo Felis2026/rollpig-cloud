@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..auth import verify_token
-from ..db import get_session
+from ..db import get_session, run_transaction_with_sqlite_lock_retry
 from ..models import RoastReservation, UnrolledRoastAttempt
 from ..schemas import (
     RoastReservationClaimRequest,
@@ -155,8 +155,10 @@ def claim(req: RoastReservationClaimRequest, session: Session = Depends(get_sess
     return RoastReservationClaimResponse(items=items, has_owned=has_owned)
 
 
-@router.post("/outcome/prepare", response_model=RoastReservationMutationResponse)
-def prepare_outcome(req: RoastReservationOutcomeRequest, session: Session = Depends(get_session)):
+def _prepare_outcome_once(
+    req: RoastReservationOutcomeRequest,
+    session: Session,
+) -> RoastReservationMutationResponse:
     """幂等固化结果；相同 token 只能绑定同一份 outcome snapshot。"""
 
     row = session.execute(
@@ -177,7 +179,7 @@ def prepare_outcome(req: RoastReservationOutcomeRequest, session: Session = Depe
         # 事务中固化，重领时只读取已保存结果，不会重复成长或改变群内提示。
         if (
             req.settle_daily_feed
-            and row.force_mode is None
+            and row.force_mode not in {"normal", "super"}
             and str(req.outcome_snapshot.get("event_type") or "") == "success"
         ):
             reservation_item = reservation_to_schema(session, row)
@@ -209,6 +211,16 @@ def prepare_outcome(req: RoastReservationOutcomeRequest, session: Session = Depe
         row.status = "prepared"
     session.commit()
     return RoastReservationMutationResponse(ok=True, reservation=reservation_to_schema(session, row))
+
+
+@router.post("/outcome/prepare", response_model=RoastReservationMutationResponse)
+def prepare_outcome(req: RoastReservationOutcomeRequest, session: Session = Depends(get_session)):
+    """SQLite 锁冲突时重跑完整结果结算，确保快照与加餐同时成功或同时回滚。"""
+
+    return run_transaction_with_sqlite_lock_retry(
+        session,
+        lambda: _prepare_outcome_once(req, session),
+    )
 
 
 @router.post("/outcome", response_model=RoastReservationMutationResponse)
