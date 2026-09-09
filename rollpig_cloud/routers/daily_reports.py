@@ -562,8 +562,10 @@ def transition_daily_report(
         )
         if req.message_id:
             values["message_id"] = str(req.message_id)[:128]
-    elif req.action == "release":
-        allowed_statuses = ("claimed",)
+    elif req.action in {"release", "retry"}:
+        # release 只处理尚未发送的 claimed；retry 只接受外部接口已明确拒绝发送的
+        # sending。结果不明的发送仍必须进入 uncertain，不能由租约自动重领。
+        allowed_statuses = ("claimed",) if req.action == "release" else ("sending",)
         retry_index = max(0, row.attempt_count - 1)
         deadline = _retry_deadline(row.date_str)
         if retry_index >= len(DAILY_REPORT_RETRY_DELAYS):

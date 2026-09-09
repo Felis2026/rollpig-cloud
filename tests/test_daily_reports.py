@@ -99,7 +99,7 @@ class DailyReportDeliveryTests(unittest.TestCase):
                 self.session,
             )
 
-    def _transition(self, claim, action: str):
+    def _transition(self, claim, action: str, *, error: str = ""):
         with patch("rollpig_cloud.routers.daily_reports._utc_now", return_value=self.now):
             return transition_daily_report(
                 DailyReportTransitionRequest(
@@ -107,6 +107,7 @@ class DailyReportDeliveryTests(unittest.TestCase):
                     group_id=claim.group_id,
                     claim_token=claim.claim_token,
                     action=action,
+                    error=error,
                 ),
                 self.session,
             )
@@ -456,6 +457,38 @@ class DailyReportDeliveryTests(unittest.TestCase):
         self.assertEqual(too_early.next_claim_at, released.next_attempt_at)
         self.assertNotEqual(first.claim_token, second.claim_token)
         self.assertEqual(second.attempt_count, 2)
+
+    def test_confirmed_send_failure_can_be_reclaimed_by_another_instance(self) -> None:
+        first = self._claim("instance-a").items[0]
+        self.assertTrue(self._transition(first, "sending").ok)
+
+        invalid_release = self._transition(first, "release")
+        retried = self._transition(
+            first,
+            "retry",
+            error="ActionFailed: rich media transfer failed",
+        )
+        too_early = self._claim("instance-b")
+        self.now = retried.next_attempt_at
+        second = self._claim("instance-b").items[0]
+
+        self.assertFalse(invalid_release.ok)
+        self.assertTrue(retried.ok)
+        self.assertEqual(retried.status, "pending")
+        self.assertEqual(too_early.items, [])
+        self.assertNotEqual(first.claim_token, second.claim_token)
+        self.assertEqual(second.attempt_count, 2)
+
+    def test_oversized_transition_error_is_truncated_before_validation(self) -> None:
+        request = DailyReportTransitionRequest(
+            date_str=DATE,
+            group_id="100",
+            claim_token="claim-token",
+            action="uncertain",
+            error="x" * 1000,
+        )
+
+        self.assertEqual(len(request.error), 512)
 
     def test_sent_requires_sending_and_old_token_cannot_transition(self) -> None:
         first = self._claim("instance-a").items[0]

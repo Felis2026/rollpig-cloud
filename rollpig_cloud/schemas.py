@@ -223,9 +223,16 @@ class DailyReportTransitionRequest(BaseModel):
     date_str: dt.date
     group_id: str = Field(min_length=1, max_length=64)
     claim_token: str = Field(min_length=1, max_length=64)
-    action: Literal["sending", "sent", "release", "uncertain", "skip"]
+    action: Literal["sending", "sent", "release", "retry", "uncertain", "skip"]
     message_id: str = Field(default="", max_length=128)
     error: str = Field(default="", max_length=512)
+
+    @field_validator("error", mode="before")
+    @classmethod
+    def truncate_error(cls, value: object) -> object:
+        """旧客户端可能上报完整 OneBot 异常；先截断再执行字段长度校验。"""
+
+        return value[:512] if isinstance(value, str) else value
 
 
 class DailyReportTransitionResponse(BaseModel):
