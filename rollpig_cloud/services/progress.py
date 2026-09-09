@@ -240,9 +240,8 @@ def apply_daily_feed(
             session.flush()
     except (IntegrityError, OperationalError) as e:
         # SQLite 在两个事务都完成读取后才开始写入时，会抛出 OperationalError: database is locked
-        # 而不是 IntegrityError。此时需要回滚嵌套事务并查询现有记录。
-        if isinstance(e, OperationalError):
-            session.rollback()
+        # 而不是 IntegrityError。begin_nested() 的 SAVEPOINT 已自动回滚，无需手动 rollback。
+        # 查询现有记录以返回幂等结果。
         existing = session.execute(
             select(UserDailyFeed).where(
                 UserDailyFeed.date_str == date_str,
