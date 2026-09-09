@@ -28,6 +28,8 @@ def create_event(
     session: Session = Depends(get_session),
     identity: ApiKeyIdentity = Depends(verify_token),
 ):
+    # 在函数开始时解析一次日期，避免跨午夜请求时事件记录与加餐结算使用不同日期
+    effective_date = req.date_str or rollpig_today()
     _recorded, created = record_roast_event_with_status(session, req)
     daily_feed_result = None
     if (
@@ -38,7 +40,7 @@ def create_event(
     ):
         daily_feed_result = apply_daily_feed(
             session,
-            date_str=req.date_str or rollpig_today(),
+            date_str=effective_date,
             user_id=req.attacker_id,
             source_type="roast",
             source_id=req.source_id,
