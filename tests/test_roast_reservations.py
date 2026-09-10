@@ -2,27 +2,35 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import sqlite3
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 from unittest.mock import patch
 
-from sqlalchemy import create_engine, inspect, select, text
+from sqlalchemy import create_engine, event as sqlalchemy_event, inspect, select, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 os.environ.setdefault("ROLLPIG_CLOUD_DATABASE_URL", "sqlite+pysqlite:///:memory:")
 
-from rollpig_cloud.db import Base
+from rollpig_cloud.db import Base, run_transaction_with_sqlite_lock_retry
 from rollpig_cloud.main import app
 from rollpig_cloud.migrations import ensure_runtime_migrations
 from rollpig_cloud.models import (
+    Collection,
     DailyRoll,
     GroupProtection,
     RoastEvent,
     RoastReservation,
     RoastReservationParticipant,
+    UserDailyFeed,
+    UserPigProgress,
     UserUsage,
 )
+from rollpig_cloud.config import settings
 from rollpig_cloud.schemas import ConsumeForceRequest, ConsumeRoastRequest, EventCreateRequest, RoastReservationPrepareRequest
 from rollpig_cloud.schemas import (
     RoastReservationClaimRequest,
@@ -41,6 +49,7 @@ from rollpig_cloud.routers.roast_reservations import (
 from rollpig_cloud.routers.cooldowns import consume_force, consume_roast
 from rollpig_cloud.routers.events import create_event, list_events
 from rollpig_cloud.services.events import record_roast_event_with_status
+from rollpig_cloud.services.progress import apply_daily_feed
 from rollpig_cloud.services.reservations import activate_target_reservations, prepare_reservation
 
 
@@ -81,6 +90,347 @@ class CloudRoastReservationTests(unittest.TestCase):
         }
         payload.update(overrides)
         return RoastReservationClaimRequest(**payload)
+
+    def _add_daily_pig(self, user_id: str, pig_id: str, *, copies: int = 1) -> None:
+        self.session.add_all([
+            DailyRoll(
+                date_str=dt.date(2026, 8, 7),
+                user_id=user_id,
+                pig_id=pig_id,
+                previous_copies=max(0, copies - 1),
+                copies_after_roll=copies,
+                previous_expert_level=max(0, copies - 2),
+                expert_level_after_roll=max(0, copies - 1),
+            ),
+            Collection(user_id=user_id, pig_id=pig_id),
+            UserPigProgress(
+                tenant_id=settings.default_tenant_id,
+                user_id=user_id,
+                pig_id=pig_id,
+                copies=copies,
+                growth_bonus=0,
+            ),
+        ])
+        self.session.commit()
+
+    def test_normal_success_feeds_once_across_sources(self):
+        self._add_daily_pig("a", "pig-a")
+
+        first = create_event(
+            EventCreateRequest(
+                event_type="success",
+                attacker_id="a",
+                target_id="target",
+                group_id="100",
+                date_str=dt.date(2026, 8, 7),
+                settle_daily_feed=True,
+                source_id="event-1",
+            ),
+            self.session,
+        )
+        second = create_event(
+            EventCreateRequest(
+                event_type="success",
+                attacker_id="a",
+                target_id="target-2",
+                group_id="100",
+                date_str=dt.date(2026, 8, 7),
+                settle_daily_feed=True,
+                source_id="event-2",
+            ),
+            self.session,
+        )
+
+        progress = self.session.scalar(select(UserPigProgress).where(UserPigProgress.user_id == "a"))
+        feeds = self.session.scalars(select(UserDailyFeed).where(UserDailyFeed.user_id == "a")).all()
+        self.assertEqual((first.daily_feed_result.status, first.daily_feed_result.new_level), ("fed", 1))
+        self.assertEqual(second.daily_feed_result.status, "already_fed")
+        self.assertEqual((progress.copies, progress.growth_bonus, len(feeds)), (1, 1, 1))
+
+    def test_event_retries_whole_transaction_after_sqlite_lock(self):
+        self._add_daily_pig("a", "pig-a")
+        attempts = 0
+
+        def apply_after_one_lock(*args, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise OperationalError(
+                    "INSERT INTO user_daily_feeds",
+                    {},
+                    sqlite3.OperationalError("database is locked"),
+                )
+            return apply_daily_feed(*args, **kwargs)
+
+        with patch(
+            "rollpig_cloud.routers.events.apply_daily_feed",
+            side_effect=apply_after_one_lock,
+        ):
+            result = create_event(
+                EventCreateRequest(
+                    event_type="success",
+                    attacker_id="a",
+                    target_id="target",
+                    group_id="100",
+                    date_str=dt.date(2026, 8, 7),
+                    settle_daily_feed=True,
+                    source_id="event-lock-retry",
+                ),
+                self.session,
+            )
+
+        progress = self.session.scalar(select(UserPigProgress).where(UserPigProgress.user_id == "a"))
+        events = self.session.scalars(select(RoastEvent)).all()
+        feeds = self.session.scalars(select(UserDailyFeed)).all()
+        self.assertEqual((attempts, result.daily_feed_result.status), (2, "fed"))
+        self.assertEqual((len(events), len(feeds), progress.growth_bonus), (1, 1, 1))
+
+    def test_old_or_incomplete_event_request_does_not_trigger_feed(self):
+        self._add_daily_pig("a", "pig-a")
+
+        legacy = create_event(
+            EventCreateRequest(
+                event_type="success",
+                attacker_id="a",
+                target_id="target",
+                group_id="100",
+                date_str=dt.date(2026, 8, 7),
+            ),
+            self.session,
+        )
+        missing_source = create_event(
+            EventCreateRequest(
+                event_type="success",
+                attacker_id="a",
+                target_id="target-2",
+                group_id="100",
+                date_str=dt.date(2026, 8, 7),
+                settle_daily_feed=True,
+            ),
+            self.session,
+        )
+
+        progress = self.session.scalar(select(UserPigProgress).where(UserPigProgress.user_id == "a"))
+        self.assertIsNone(legacy.daily_feed_result)
+        self.assertIsNone(missing_source.daily_feed_result)
+        self.assertEqual(progress.growth_bonus, 0)
+
+    def test_max_level_does_not_consume_daily_feed(self):
+        self._add_daily_pig("a", "pig-a", copies=6)
+
+        result = create_event(
+            EventCreateRequest(
+                event_type="success",
+                attacker_id="a",
+                target_id="target",
+                group_id="100",
+                date_str=dt.date(2026, 8, 7),
+                settle_daily_feed=True,
+                source_id="event-1",
+            ),
+            self.session,
+        )
+
+        self.assertEqual(result.daily_feed_result.status, "max_level")
+        self.assertIsNone(self.session.scalar(select(UserDailyFeed)))
+
+    def test_successful_reservation_feeds_all_participants_and_reuses_results(self):
+        self._add_daily_pig("a", "pig-a")
+        self._add_daily_pig("b", "pig-b")
+        prepare_reservation(self.session, self._request())
+        self.session.commit()
+        prepare_reservation(self.session, self._request("b"))
+        self.session.commit()
+        activate_target_reservations(
+            self.session,
+            date_str=dt.date(2026, 8, 7),
+            target_id="target",
+            target_pig_id="pig-target",
+        )
+        self.session.commit()
+        reservation = claim(self._claim_request(), self.session).items[0]
+        request = RoastReservationOutcomeRequest(
+            reservation_id=reservation.reservation_id,
+            claim_token=reservation.claim_token,
+            outcome_snapshot={"event_type": "success"},
+            settle_daily_feed=True,
+        )
+
+        saved = prepare_outcome(request, self.session)
+        repeated = prepare_outcome(request, self.session)
+
+        self.assertEqual([item.user_id for item in saved.reservation.daily_feed_results], ["a", "b"])
+        self.assertTrue(all(item.status == "fed" for item in saved.reservation.daily_feed_results))
+        self.assertEqual(repeated.reservation.daily_feed_results, saved.reservation.daily_feed_results)
+        progresses = self.session.scalars(select(UserPigProgress).order_by(UserPigProgress.user_id)).all()
+        self.assertEqual([(row.user_id, row.growth_bonus) for row in progresses], [("a", 1), ("b", 1)])
+
+    def test_forced_reservation_never_feeds_even_when_client_requests_it(self):
+        self._add_daily_pig("a", "pig-a")
+        prepare_reservation(self.session, self._request(force_mode="normal"))
+        self.session.commit()
+        activate_target_reservations(
+            self.session,
+            date_str=dt.date(2026, 8, 7),
+            target_id="target",
+            target_pig_id="pig-target",
+        )
+        self.session.commit()
+        reservation = claim(self._claim_request(), self.session).items[0]
+
+        saved = prepare_outcome(
+            RoastReservationOutcomeRequest(
+                reservation_id=reservation.reservation_id,
+                claim_token=reservation.claim_token,
+                outcome_snapshot={"event_type": "success"},
+                settle_daily_feed=True,
+            ),
+            self.session,
+        )
+
+        progress = self.session.scalar(select(UserPigProgress).where(UserPigProgress.user_id == "a"))
+        self.assertEqual(saved.reservation.daily_feed_results, [])
+        self.assertEqual(progress.growth_bonus, 0)
+
+    def test_blank_force_mode_keeps_ordinary_reservation_feed_semantics(self):
+        self._add_daily_pig("a", "pig-a")
+        prepare_reservation(self.session, self._request(force_mode=""))
+        self.session.commit()
+        activate_target_reservations(
+            self.session,
+            date_str=dt.date(2026, 8, 7),
+            target_id="target",
+            target_pig_id="pig-target",
+        )
+        self.session.commit()
+        reservation = claim(self._claim_request(), self.session).items[0]
+
+        saved = prepare_outcome(
+            RoastReservationOutcomeRequest(
+                reservation_id=reservation.reservation_id,
+                claim_token=reservation.claim_token,
+                outcome_snapshot={"event_type": "success"},
+                settle_daily_feed=True,
+            ),
+            self.session,
+        )
+
+        progress = self.session.scalar(select(UserPigProgress).where(UserPigProgress.user_id == "a"))
+        usage = self.session.scalar(select(UserUsage).where(UserUsage.user_id == "a"))
+        self.assertEqual([item.status for item in saved.reservation.daily_feed_results], ["fed"])
+        self.assertEqual((usage.roast_charges, progress.growth_bonus), (1, 1))
+
+    def test_reservation_outcome_retries_whole_transaction_after_sqlite_lock(self):
+        self._add_daily_pig("a", "pig-a")
+        prepare_reservation(self.session, self._request())
+        self.session.commit()
+        activate_target_reservations(
+            self.session,
+            date_str=dt.date(2026, 8, 7),
+            target_id="target",
+            target_pig_id="pig-target",
+        )
+        self.session.commit()
+        reservation = claim(self._claim_request(), self.session).items[0]
+        request = RoastReservationOutcomeRequest(
+            reservation_id=reservation.reservation_id,
+            claim_token=reservation.claim_token,
+            outcome_snapshot={"event_type": "success"},
+            settle_daily_feed=True,
+        )
+        attempts = 0
+
+        def apply_after_one_lock(*args, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise OperationalError(
+                    "INSERT INTO user_daily_feeds",
+                    {},
+                    sqlite3.OperationalError("database is locked"),
+                )
+            return apply_daily_feed(*args, **kwargs)
+
+        with patch(
+            "rollpig_cloud.routers.roast_reservations.apply_daily_feed",
+            side_effect=apply_after_one_lock,
+        ):
+            saved = prepare_outcome(request, self.session)
+
+        progress = self.session.scalar(select(UserPigProgress).where(UserPigProgress.user_id == "a"))
+        events = self.session.scalars(select(UserDailyFeed)).all()
+        self.assertEqual((attempts, len(saved.reservation.daily_feed_results)), (2, 1))
+        self.assertEqual((len(events), progress.growth_bonus), (1, 1))
+
+    def test_daily_feed_is_unique_under_concurrent_sqlite_writers(self):
+        self.session.close()
+        self.engine.dispose()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database_path = Path(temp_dir) / "daily-feed.sqlite3"
+            engine = create_engine(
+                f"sqlite+pysqlite:///{database_path.as_posix()}",
+                future=True,
+                connect_args={"check_same_thread": False, "timeout": 10},
+            )
+            Base.metadata.create_all(engine)
+            with Session(engine) as session:
+                session.add_all([
+                    DailyRoll(
+                        date_str=dt.date(2026, 8, 7),
+                        user_id="a",
+                        pig_id="pig-a",
+                        previous_copies=0,
+                        copies_after_roll=1,
+                    ),
+                    UserPigProgress(
+                        tenant_id=settings.default_tenant_id,
+                        user_id="a",
+                        pig_id="pig-a",
+                        copies=1,
+                        growth_bonus=0,
+                    ),
+                ])
+                session.commit()
+
+            barrier = Barrier(2)
+
+            def synchronize_after_progress_read(conn, _cursor, statement, _parameters, _context, _executemany):
+                # 强制两个事务都持有旧读取快照后再写入，稳定复现 SQLite 锁升级冲突。
+                if (
+                    statement.lstrip().upper().startswith("SELECT")
+                    and "user_pig_progress" in statement.casefold()
+                    and not conn.info.get("daily_feed_progress_read")
+                ):
+                    conn.info["daily_feed_progress_read"] = True
+                    barrier.wait(timeout=5)
+
+            sqlalchemy_event.listen(engine, "after_cursor_execute", synchronize_after_progress_read)
+
+            def settle(source_id: str) -> str:
+                with Session(engine, expire_on_commit=False) as session:
+                    def settle_once() -> str:
+                        result = apply_daily_feed(
+                            session,
+                            date_str=dt.date(2026, 8, 7),
+                            user_id="a",
+                            source_type="roast",
+                            source_id=source_id,
+                        )
+                        session.commit()
+                        return result.status
+
+                    return run_transaction_with_sqlite_lock_retry(session, settle_once)
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                statuses = sorted(executor.map(settle, ("event-1", "event-2")))
+
+            with Session(engine) as session:
+                progress = session.scalar(select(UserPigProgress).where(UserPigProgress.user_id == "a"))
+                feed_count = len(session.scalars(select(UserDailyFeed)).all())
+            engine.dispose()
+
+        self.assertEqual(statuses, ["already_fed", "fed"])
+        self.assertEqual((progress.growth_bonus, feed_count), (1, 1))
 
     def test_prepare_create_join_and_duplicate_is_atomic(self):
         created = prepare_reservation(self.session, self._request())
@@ -679,6 +1029,11 @@ class CloudRoastReservationTests(unittest.TestCase):
                         text("SELECT id, status FROM roast_reservations ORDER BY id")
                     ).all()
                 self.assertEqual(statuses, [(1, "sending"), (2, "processing")])
+                columns = {
+                    column["name"]
+                    for column in inspect(engine).get_columns("roast_reservations")
+                }
+                self.assertIn("daily_feed_results", columns)
             finally:
                 engine.dispose()
 
@@ -808,19 +1163,31 @@ class CloudRoastReservationTests(unittest.TestCase):
         )
 
     def test_event_without_date_uses_rollpig_business_date(self):
-        with patch("rollpig_cloud.services.events.rollpig_today", return_value=dt.date(2026, 8, 9)):
-            create_event(
+        self._add_daily_pig("a", "pig-a")
+        with (
+            patch("rollpig_cloud.routers.events.rollpig_today", return_value=dt.date(2026, 8, 7)),
+            patch(
+                "rollpig_cloud.services.events.rollpig_today",
+                side_effect=AssertionError("事件服务不应再次解析业务日期"),
+            ),
+        ):
+            result = create_event(
                 EventCreateRequest(
                     event_type="success",
                     attacker_id="a",
                     target_id="b",
                     group_id="100",
+                    settle_daily_feed=True,
+                    source_id="event-business-date",
                 ),
                 self.session,
             )
 
         events = self.session.scalars(select(RoastEvent)).all()
-        self.assertEqual([event.date_str for event in events], [dt.date(2026, 8, 9)])
+        feeds = self.session.scalars(select(UserDailyFeed)).all()
+        self.assertEqual([event.date_str for event in events], [dt.date(2026, 8, 7)])
+        self.assertEqual([feed.date_str for feed in feeds], [dt.date(2026, 8, 7)])
+        self.assertEqual(result.daily_feed_result.status, "fed")
 
     def test_event_status_distinguishes_creation_from_idempotent_retry(self):
         request = EventCreateRequest(

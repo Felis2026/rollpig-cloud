@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..auth import verify_token
-from ..db import get_session
+from ..db import get_session, run_transaction_with_sqlite_lock_retry
 from ..models import RoastReservation, UnrolledRoastAttempt
 from ..schemas import (
     RoastReservationClaimRequest,
@@ -25,6 +25,7 @@ from ..schemas import (
     UnrolledRoastAttemptResponse,
 )
 from ..services.events import bind_reservation_event, record_roast_event
+from ..services.progress import apply_daily_feed
 from ..services.reservations import activate_if_target_already_rolled, prepare_reservation, reservation_to_schema
 
 
@@ -154,8 +155,10 @@ def claim(req: RoastReservationClaimRequest, session: Session = Depends(get_sess
     return RoastReservationClaimResponse(items=items, has_owned=has_owned)
 
 
-@router.post("/outcome/prepare", response_model=RoastReservationMutationResponse)
-def prepare_outcome(req: RoastReservationOutcomeRequest, session: Session = Depends(get_session)):
+def _prepare_outcome_once(
+    req: RoastReservationOutcomeRequest,
+    session: Session,
+) -> RoastReservationMutationResponse:
     """幂等固化结果；相同 token 只能绑定同一份 outcome snapshot。"""
 
     row = session.execute(
@@ -171,6 +174,36 @@ def prepare_outcome(req: RoastReservationOutcomeRequest, session: Session = Depe
         if row.status != "processing":
             return RoastReservationMutationResponse(ok=False)
         row.outcome_snapshot = req.outcome_snapshot
+        # ================================ 预约加餐结算 ================================ #
+        # 只有新客户端明确声明、普通预约且结果成功时结算。结果与预约快照在同一
+        # 事务中固化，重领时只读取已保存结果，不会重复成长或改变群内提示。
+        if (
+            req.settle_daily_feed
+            and row.force_mode not in {"normal", "super"}
+            and str(req.outcome_snapshot.get("event_type") or "") == "success"
+        ):
+            reservation_item = reservation_to_schema(session, row)
+            # 多场预约可能共享参与者；统一按 user_id 获取用户行锁，避免两场事务
+            # 以相反参与顺序结算时形成死锁。最终结果仍按原参与顺序固化和展示。
+            feed_results_by_user = {
+                participant.user_id: apply_daily_feed(
+                    session,
+                    date_str=row.date_str,
+                    user_id=participant.user_id,
+                    source_type="reservation",
+                    source_id=row.reservation_id,
+                )
+                for participant in sorted(
+                    reservation_item.participants,
+                    key=lambda item: item.user_id,
+                )
+            }
+            row.daily_feed_results = [
+                feed_results_by_user[participant.user_id].model_dump(mode="json")
+                for participant in reservation_item.participants
+            ]
+        else:
+            row.daily_feed_results = []
     elif row.outcome_snapshot != req.outcome_snapshot:
         # 相同 token 出现不同随机结果代表客户端状态已分叉，不能静默覆盖或假成功。
         return RoastReservationMutationResponse(ok=False)
@@ -178,6 +211,16 @@ def prepare_outcome(req: RoastReservationOutcomeRequest, session: Session = Depe
         row.status = "prepared"
     session.commit()
     return RoastReservationMutationResponse(ok=True, reservation=reservation_to_schema(session, row))
+
+
+@router.post("/outcome/prepare", response_model=RoastReservationMutationResponse)
+def prepare_outcome(req: RoastReservationOutcomeRequest, session: Session = Depends(get_session)):
+    """SQLite 锁冲突时重跑完整结果结算，确保快照与加餐同时成功或同时回滚。"""
+
+    return run_transaction_with_sqlite_lock_retry(
+        session,
+        lambda: _prepare_outcome_once(req, session),
+    )
 
 
 @router.post("/outcome", response_model=RoastReservationMutationResponse)

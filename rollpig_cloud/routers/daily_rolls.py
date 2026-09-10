@@ -102,6 +102,8 @@ def get_or_create_daily_roll(
         created.is_new_pig = progress.is_new_pig
         created.previous_copies = progress.previous_copies
         created.copies_after_roll = progress.copies_after_roll
+        created.previous_expert_level = progress.previous_expert_level
+        created.expert_level_after_roll = progress.expert_level_after_roll
         created.collection_size_after_roll = progress.collection_size_after_roll
         created.previous_duplicate_streak = progress.previous_duplicate_streak
         created.duplicate_streak_after_roll = progress.duplicate_streak_after_roll

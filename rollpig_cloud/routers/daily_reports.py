@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from ..auth import verify_token
 from ..config import ROLLPIG_TIMEZONE
 from ..db import database_cutoff_value, get_session
-from ..models import Collection, DailyReportDelivery, DailyRoll, GroupRoll
+from ..models import Collection, DailyReportDelivery, DailyRoll, GroupRoll, UserDailyFeed
 from ..schemas import (
     DailyReportClaimItem,
     DailyReportClaimRequest,
@@ -64,12 +64,22 @@ def _retry_deadline(date_str: dt.date) -> dt.datetime:
     return _naive_utc(local_deadline)
 
 
-def _expert_level_from_copies(copies: int | None) -> int | None:
+def _expert_level_from_roll(
+    row: DailyRoll | None,
+    feed_level: int | None = None,
+) -> int | None:
     """历史抽取缺少 copies 快照时返回 None，由客户端隐藏该排行项。"""
 
-    if copies is None:
+    if row is None or row.copies_after_roll is None:
         return None
-    return min(max(int(copies) - 1, 0), 5)
+    base_level = (
+        int(row.expert_level_after_roll)
+        if row.expert_level_after_roll is not None
+        else max(int(row.copies_after_roll) - 1, 0)
+    )
+    if feed_level is not None:
+        base_level = max(base_level, int(feed_level))
+    return min(max(base_level, 0), 5)
 
 
 def _claim_item(row: DailyReportDelivery) -> DailyReportClaimItem:
@@ -175,6 +185,7 @@ def get_daily_report_profiles(
     daily_rolls: dict[str, DailyRoll] = {}
     collection_stats: dict[str, tuple[int, dt.datetime | None]] = {}
     recent_rolls: dict[str, DailyRoll] = {}
+    latest_feeds: dict[str, UserDailyFeed] = {}
     for batch in _user_id_batches(user_ids):
         # ================================ 当日群抽取与成长 ================================ #
         group_rolls.update({
@@ -240,6 +251,31 @@ def get_daily_report_profiles(
                 )
             ).scalars()
         })
+        latest_feed_dates = (
+            select(
+                UserDailyFeed.user_id.label("user_id"),
+                func.max(UserDailyFeed.date_str).label("date_str"),
+            )
+            .where(
+                UserDailyFeed.user_id.in_(batch),
+                UserDailyFeed.date_str <= req.date_str,
+                UserDailyFeed.created_at <= cutoff_at,
+            )
+            .group_by(UserDailyFeed.user_id)
+            .subquery()
+        )
+        latest_feeds.update({
+            row.user_id: row
+            for row in session.execute(
+                select(UserDailyFeed).join(
+                    latest_feed_dates,
+                    and_(
+                        UserDailyFeed.user_id == latest_feed_dates.c.user_id,
+                        UserDailyFeed.date_str == latest_feed_dates.c.date_str,
+                    ),
+                )
+            ).scalars()
+        })
 
     # ================================ 稳定响应组装 ================================ #
     items: list[DailyReportProfileItem] = []
@@ -249,23 +285,47 @@ def get_daily_report_profiles(
         daily_roll_matches = bool(
             daily_roll is not None and daily_roll.pig_id == daily_pig_id
         )
+        latest_feed = latest_feeds.get(user_id)
+        feed_level = int(latest_feed.new_level) if latest_feed is not None else None
+        # 等级和达成时间必须来自同一次升级；此前日期的加餐已计入抽取快照，
+        # 不能替换当天抽取时间。查询已统一应用截止点，不增加逐用户数据库访问。
+        daily_base_level = _expert_level_from_roll(daily_roll) if daily_roll_matches else None
+        matching_feed = bool(
+            latest_feed is not None
+            and latest_feed.pig_id == daily_pig_id
+            and 0 <= latest_feed.previous_level < latest_feed.new_level <= 5
+        )
+        daily_ex_level = (
+            _expert_level_from_roll(daily_roll, feed_level if matching_feed else None)
+            if daily_roll_matches else None
+        )
+        daily_achieved_at = daily_roll.created_at if daily_roll_matches else None
+        if (
+            latest_feed is not None
+            and latest_feed.date_str == req.date_str
+            and matching_feed
+            and daily_base_level is not None
+            and latest_feed.new_level > daily_base_level
+        ):
+            daily_achieved_at = latest_feed.created_at
         catalog_count, catalog_achieved_at = collection_stats.get(user_id, (0, None))
         recent_roll = recent_rolls.get(user_id)
         items.append(
             DailyReportProfileItem(
                 user_id=user_id,
                 daily_pig_id=daily_pig_id,
-                daily_ex_level=(
-                    _expert_level_from_copies(daily_roll.copies_after_roll)
-                    if daily_roll_matches
-                    else None
-                ),
-                daily_achieved_at=(daily_roll.created_at if daily_roll_matches else None),
+                daily_ex_level=daily_ex_level,
+                daily_achieved_at=daily_achieved_at,
                 catalog_count=catalog_count,
                 catalog_achieved_at=catalog_achieved_at,
                 recent_pig_id=(recent_roll.pig_id if recent_roll is not None else ""),
                 recent_ex_level=(
-                    _expert_level_from_copies(recent_roll.copies_after_roll)
+                    _expert_level_from_roll(
+                        recent_roll,
+                        feed_level
+                        if latest_feed is not None and latest_feed.pig_id == recent_roll.pig_id
+                        else None,
+                    )
                     if recent_roll is not None
                     else None
                 ),
@@ -502,8 +562,10 @@ def transition_daily_report(
         )
         if req.message_id:
             values["message_id"] = str(req.message_id)[:128]
-    elif req.action == "release":
-        allowed_statuses = ("claimed",)
+    elif req.action in {"release", "retry"}:
+        # release 只处理尚未发送的 claimed；retry 只接受外部接口已明确拒绝发送的
+        # sending。结果不明的发送仍必须进入 uncertain，不能由租约自动重领。
+        allowed_statuses = ("claimed",) if req.action == "release" else ("sending",)
         retry_index = max(0, row.attempt_count - 1)
         deadline = _retry_deadline(row.date_str)
         if retry_index >= len(DAILY_REPORT_RETRY_DELAYS):

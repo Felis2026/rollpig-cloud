@@ -249,6 +249,13 @@ class CloudDailyRollSnapshotTests(unittest.TestCase):
                     "id INTEGER PRIMARY KEY, date_str DATE NOT NULL, user_id VARCHAR(64) NOT NULL, "
                     "pig_id VARCHAR(128) NOT NULL, created_at DATETIME)"
                 ))
+                connection.execute(text(
+                    "CREATE TABLE user_pig_progress ("
+                    "id INTEGER PRIMARY KEY, tenant_id VARCHAR(64) NOT NULL, "
+                    "user_id VARCHAR(64) NOT NULL, pig_id VARCHAR(128) NOT NULL, "
+                    "copies INTEGER NOT NULL, first_obtained_at DATETIME NOT NULL, "
+                    "updated_at DATETIME NOT NULL)"
+                ))
 
             ensure_runtime_migrations(engine, backfill_group_activity=False)
             ensure_runtime_migrations(engine, backfill_group_activity=False)
@@ -258,12 +265,19 @@ class CloudDailyRollSnapshotTests(unittest.TestCase):
                 "is_new_pig",
                 "previous_copies",
                 "copies_after_roll",
+                "previous_expert_level",
+                "expert_level_after_roll",
                 "collection_size_after_roll",
                 "previous_duplicate_streak",
                 "duplicate_streak_after_roll",
                 "resource_version",
                 "appearance_snapshot",
             }.issubset(columns))
+            progress_columns = {
+                column["name"]
+                for column in inspect(engine).get_columns("user_pig_progress")
+            }
+            self.assertIn("growth_bonus", progress_columns)
             engine.dispose()
 
     def test_duplicate_column_race_is_accepted_after_schema_reinspection(self):

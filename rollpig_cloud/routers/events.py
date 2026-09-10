@@ -7,27 +7,47 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..auth import verify_token
-from ..config import ApiKeyIdentity
+from ..config import ApiKeyIdentity, rollpig_today
 from ..db import (
     database_cutoff_value,
     database_datetime_for_response,
     get_session,
+    run_transaction_with_sqlite_lock_retry,
 )
 from ..models import RoastEvent
-from ..schemas import EventCreateRequest, EventItem, EventListResponse
+from ..schemas import EventCreateRequest, EventCreateResponse, EventItem, EventListResponse
 from ..services.events import record_roast_event_with_status
 from ..services.key_usage import record_key_mutation_outcome
+from ..services.progress import apply_daily_feed
 
 router = APIRouter(prefix="/v1/events", tags=["events"], dependencies=[Depends(verify_token)])
 
 
-@router.post("")
-def create_event(
+# ================================ 事件写入事务 ================================ #
+
+
+def _create_event_once(
     req: EventCreateRequest,
-    session: Session = Depends(get_session),
-    identity: ApiKeyIdentity = Depends(verify_token),
-):
+    session: Session,
+    identity: ApiKeyIdentity | object,
+) -> EventCreateResponse:
+    """在同一事务内记录事件、加餐和 Key 用量。"""
+
     _recorded, created = record_roast_event_with_status(session, req)
+    daily_feed_result = None
+    if (
+        req.settle_daily_feed
+        and req.source_id
+        and req.event_type == "success"
+        and not req.reservation_id
+    ):
+        daily_feed_result = apply_daily_feed(
+            session,
+            date_str=req.date_str,
+            user_id=req.attacker_id,
+            source_type="roast",
+            source_id=req.source_id,
+        )
     record_key_mutation_outcome(
         session,
         identity,
@@ -36,7 +56,21 @@ def create_event(
         idempotent_hits=int(not created),
     )
     session.commit()
-    return {"ok": True}
+    return EventCreateResponse(ok=True, daily_feed_result=daily_feed_result)
+
+
+@router.post("", response_model=EventCreateResponse)
+def create_event(
+    req: EventCreateRequest,
+    session: Session = Depends(get_session),
+    identity: ApiKeyIdentity = Depends(verify_token),
+):
+    # 日期在重试前只解析一次，事件、群活跃和加餐始终落在同一业务日。
+    effective_req = req.model_copy(update={"date_str": req.date_str or rollpig_today()})
+    return run_transaction_with_sqlite_lock_retry(
+        session,
+        lambda: _create_event_once(effective_req, session, identity),
+    )
 
 
 @router.get("", response_model=EventListResponse)

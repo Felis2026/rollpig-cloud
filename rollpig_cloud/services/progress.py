@@ -4,11 +4,21 @@ import datetime as dt
 from dataclasses import dataclass
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..models import Collection, DailyRoll, UserDrawState, UserPigProgress
-from ..schemas import DailyRollLookupResponse, DailyRollOutcomeSnapshot, DrawStateResponse, PigProgressItem
+from ..models import Collection, DailyRoll, UserDailyFeed, UserDrawState, UserPigProgress
+from ..schemas import (
+    DailyFeedResult,
+    DailyRollLookupResponse,
+    DailyRollOutcomeSnapshot,
+    DrawStateResponse,
+    PigProgressItem,
+)
+
+
+MAX_EXPERT_LEVEL = 5
 
 
 @dataclass(frozen=True)
@@ -18,9 +28,17 @@ class CreatedRollProgress:
     is_new_pig: bool
     previous_copies: int
     copies_after_roll: int
+    previous_expert_level: int
+    expert_level_after_roll: int
     collection_size_after_roll: int
     previous_duplicate_streak: int
     duplicate_streak_after_roll: int
+
+
+def expert_level(copies: int, growth_bonus: int = 0) -> int:
+    """按真实抽取与加餐成长计算 EX Lv.，并固定钳制到 0～5。"""
+
+    return min(max(int(copies or 0) - 1 + int(growth_bonus or 0), 0), MAX_EXPERT_LEVEL)
 
 
 def get_collection(session: Session, user_id: str, pig_id: str) -> Collection | None:
@@ -68,6 +86,7 @@ def apply_created_roll_progress(session: Session, user_id: str, pig_id: str) -> 
     draw_state = get_draw_state(session, user_id, for_update=True)
     previous_duplicate_streak = int(draw_state.duplicate_streak) if draw_state else 0
     is_new_pig = collection is None and progress is None
+    growth_bonus = max(0, int(progress.growth_bonus)) if progress else 0
 
     if is_new_pig:
         ensure_collection(session, user_id, pig_id)
@@ -123,9 +142,136 @@ def apply_created_roll_progress(session: Session, user_id: str, pig_id: str) -> 
         is_new_pig=is_new_pig,
         previous_copies=previous_copies,
         copies_after_roll=copies,
+        previous_expert_level=expert_level(previous_copies, growth_bonus),
+        expert_level_after_roll=expert_level(copies, growth_bonus),
         collection_size_after_roll=collection_size,
         previous_duplicate_streak=previous_duplicate_streak,
         duplicate_streak_after_roll=duplicate_streak,
+    )
+
+
+# ================================ 每日加餐结算 ================================ #
+
+def apply_daily_feed(
+    session: Session,
+    *,
+    date_str: dt.date,
+    user_id: str,
+    source_type: str,
+    source_id: str,
+) -> DailyFeedResult:
+    """原子尝试一次用户级加餐；只有实际成长才占用当日唯一名额。"""
+
+    daily_roll = session.execute(
+        select(DailyRoll)
+        .where(DailyRoll.date_str == date_str, DailyRoll.user_id == user_id)
+        .with_for_update()
+    ).scalar_one_or_none()
+    if daily_roll is None:
+        return DailyFeedResult(
+            status="no_daily_pig",
+            user_id=user_id,
+            source_type=source_type,
+            source_id=source_id,
+        )
+
+    existing = session.execute(
+        select(UserDailyFeed).where(
+            UserDailyFeed.date_str == date_str,
+            UserDailyFeed.user_id == user_id,
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        same_source = existing.source_type == source_type and existing.source_id == source_id
+        return DailyFeedResult(
+            status="fed" if same_source else "already_fed",
+            user_id=user_id,
+            pig_id=existing.pig_id,
+            previous_level=existing.previous_level,
+            new_level=existing.new_level,
+            source_type=source_type,
+            source_id=source_id,
+            created_at=existing.created_at,
+        )
+
+    progress = get_progress(session, user_id, daily_roll.pig_id, for_update=True)
+    if progress is None:
+        collection = get_collection(session, user_id, daily_roll.pig_id)
+        progress = UserPigProgress(
+            tenant_id=settings.default_tenant_id,
+            user_id=user_id,
+            pig_id=daily_roll.pig_id,
+            # DailyRoll 本身已经证明用户当天拥有该猪；旧数据缺进度时保守补为 1 次。
+            copies=1,
+            growth_bonus=0,
+            first_obtained_at=(collection.first_seen_at if collection else dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)),
+        )
+        session.add(progress)
+        session.flush()
+
+    previous_level = expert_level(progress.copies, progress.growth_bonus)
+    if previous_level >= MAX_EXPERT_LEVEL:
+        return DailyFeedResult(
+            status="max_level",
+            user_id=user_id,
+            pig_id=daily_roll.pig_id,
+            previous_level=previous_level,
+            new_level=previous_level,
+            source_type=source_type,
+            source_id=source_id,
+        )
+
+    next_growth_bonus = max(0, int(progress.growth_bonus or 0)) + 1
+    new_level = expert_level(progress.copies, next_growth_bonus)
+    feed_row = UserDailyFeed(
+        date_str=date_str,
+        user_id=user_id,
+        pig_id=daily_roll.pig_id,
+        source_type=source_type,
+        source_id=source_id,
+        previous_level=previous_level,
+        new_level=new_level,
+    )
+    try:
+        # SQLite 忽略 SELECT FOR UPDATE；日期用户唯一键与 SAVEPOINT 是它的最终
+        # 并发裁决。只有成功插入唯一领取行的事务才允许增加 growth_bonus。
+        with session.begin_nested():
+            session.add(feed_row)
+            session.flush()
+    except IntegrityError:
+        # 唯一键冲突才代表已有事务完成了当日加餐；数据库锁必须交给外层重跑
+        # 包含事件或预约结果在内的完整事务，不能在这里伪装成 already_fed。
+        existing = session.execute(
+            select(UserDailyFeed).where(
+                UserDailyFeed.date_str == date_str,
+                UserDailyFeed.user_id == user_id,
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            raise
+        same_source = existing.source_type == source_type and existing.source_id == source_id
+        return DailyFeedResult(
+            status="fed" if same_source else "already_fed",
+            user_id=user_id,
+            pig_id=existing.pig_id,
+            previous_level=existing.previous_level,
+            new_level=existing.new_level,
+            source_type=source_type,
+            source_id=source_id,
+            created_at=existing.created_at,
+        )
+
+    progress.growth_bonus = next_growth_bonus
+    session.refresh(feed_row, attribute_names=["created_at"])
+    return DailyFeedResult(
+        status="fed",
+        user_id=user_id,
+        pig_id=daily_roll.pig_id,
+        previous_level=previous_level,
+        new_level=new_level,
+        source_type=source_type,
+        source_id=source_id,
+        created_at=feed_row.created_at,
     )
 
 
@@ -143,7 +289,14 @@ def build_lookup_response(
     progress = get_progress(session, user_id, pig_id)
     collection = get_collection(session, user_id, pig_id)
     draw_state = get_draw_state(session, user_id)
+    daily_feed = session.execute(
+        select(UserDailyFeed).where(
+            UserDailyFeed.date_str == daily_roll.date_str,
+            UserDailyFeed.user_id == user_id,
+        )
+    ).scalar_one_or_none()
     copies = int(progress.copies) if progress else (1 if collection else 0)
+    growth_bonus = int(progress.growth_bonus) if progress else 0
     duplicate_streak = int(draw_state.duplicate_streak) if draw_state else 0
 
     growth_snapshot_available = all(
@@ -179,6 +332,16 @@ def build_lookup_response(
         response_is_new = bool(daily_roll.is_new_pig)
         response_previous_copies = int(daily_roll.previous_copies or 0)
         response_copies = int(daily_roll.copies_after_roll or 0)
+        response_previous_level = (
+            int(daily_roll.previous_expert_level)
+            if daily_roll.previous_expert_level is not None
+            else expert_level(response_previous_copies)
+        )
+        response_level = (
+            int(daily_roll.expert_level_after_roll)
+            if daily_roll.expert_level_after_roll is not None
+            else expert_level(response_copies)
+        )
         response_previous_duplicate_streak = int(daily_roll.previous_duplicate_streak or 0)
         response_duplicate_streak = int(daily_roll.duplicate_streak_after_roll or 0)
     else:
@@ -188,6 +351,8 @@ def build_lookup_response(
         response_is_new = False
         response_previous_copies = copies
         response_copies = copies
+        response_previous_level = expert_level(copies, growth_bonus)
+        response_level = response_previous_level
         response_previous_duplicate_streak = duplicate_streak
         response_duplicate_streak = duplicate_streak
 
@@ -197,6 +362,22 @@ def build_lookup_response(
         is_new_pig=response_is_new,
         previous_copies=response_previous_copies,
         copies=response_copies,
+        previous_expert_level=response_previous_level,
+        expert_level=response_level,
+        daily_feed_result=(
+            DailyFeedResult(
+                status="fed",
+                user_id=user_id,
+                pig_id=daily_feed.pig_id,
+                previous_level=daily_feed.previous_level,
+                new_level=daily_feed.new_level,
+                source_type=daily_feed.source_type,
+                source_id=daily_feed.source_id,
+                created_at=daily_feed.created_at,
+            )
+            if daily_feed is not None
+            else None
+        ),
         previous_duplicate_streak=response_previous_duplicate_streak,
         duplicate_streak=response_duplicate_streak,
         outcome_snapshot=outcome_snapshot,
@@ -219,7 +400,11 @@ def build_draw_state_response(session: Session, user_id: str) -> DrawStateRespon
     draw_state = get_draw_state(session, user_id)
 
     progress = {
-        row.pig_id: PigProgressItem(copies=int(row.copies), first_obtained_at=row.first_obtained_at)
+        row.pig_id: PigProgressItem(
+            copies=int(row.copies),
+            growth_bonus=max(0, int(row.growth_bonus or 0)),
+            first_obtained_at=row.first_obtained_at,
+        )
         for row in progress_rows
     }
     for row in collection_rows:

@@ -6,6 +6,17 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_serializer, field_validator
 
 
+class DailyFeedResult(BaseModel):
+    status: Literal["fed", "already_fed", "max_level", "no_daily_pig"]
+    user_id: str
+    pig_id: str = ""
+    previous_level: int = 0
+    new_level: int = 0
+    source_type: Literal["roast", "reservation"]
+    source_id: str
+    created_at: dt.datetime | None = None
+
+
 class DailyRollGetOrCreateRequest(BaseModel):
     user_id: str
     proposed_pig_id: str
@@ -19,6 +30,9 @@ class DailyRollLookupResponse(BaseModel):
     is_new_pig: bool = False
     previous_copies: int = 0
     copies: int = 0
+    previous_expert_level: int = 0
+    expert_level: int = 0
+    daily_feed_result: DailyFeedResult | None = None
     previous_duplicate_streak: int = 0
     duplicate_streak: int = 0
     outcome_snapshot: "DailyRollOutcomeSnapshot | None" = None
@@ -85,6 +99,7 @@ class DailyRollSnapshotUpdateResponse(BaseModel):
 
 class PigProgressItem(BaseModel):
     copies: int = 0
+    growth_bonus: int = 0
     first_obtained_at: dt.datetime | None = None
 
 
@@ -208,9 +223,16 @@ class DailyReportTransitionRequest(BaseModel):
     date_str: dt.date
     group_id: str = Field(min_length=1, max_length=64)
     claim_token: str = Field(min_length=1, max_length=64)
-    action: Literal["sending", "sent", "release", "uncertain", "skip"]
+    action: Literal["sending", "sent", "release", "retry", "uncertain", "skip"]
     message_id: str = Field(default="", max_length=128)
     error: str = Field(default="", max_length=512)
+
+    @field_validator("error", mode="before")
+    @classmethod
+    def truncate_error(cls, value: object) -> object:
+        """旧客户端可能上报完整 OneBot 异常；先截断再执行字段长度校验。"""
+
+        return value[:512] if isinstance(value, str) else value
 
 
 class DailyReportTransitionResponse(BaseModel):
@@ -264,6 +286,13 @@ class EventCreateRequest(BaseModel):
     backfire_victim_id: str = ""
     backfire_victim_name: str = ""
     special_reason: str = ""
+    settle_daily_feed: bool = False
+    source_id: str = Field(default="", max_length=64)
+
+
+class EventCreateResponse(BaseModel):
+    ok: bool = True
+    daily_feed_result: DailyFeedResult | None = None
 
 
 class EventItem(BaseModel):
@@ -355,6 +384,7 @@ class RoastReservationItem(BaseModel):
     force_mode: str | None = None
     status: str
     outcome_snapshot: dict | None = None
+    daily_feed_results: list[DailyFeedResult] = Field(default_factory=list)
     claim_token: str = ""
 
 
@@ -403,6 +433,7 @@ class RoastReservationOutcomeRequest(BaseModel):
     reservation_id: str
     claim_token: str
     outcome_snapshot: dict
+    settle_daily_feed: bool = False
 
 
 class RoastReservationMutationRequest(BaseModel):

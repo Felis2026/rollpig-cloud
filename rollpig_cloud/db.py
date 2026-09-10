@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Callable
+from typing import TypeVar
 
 from sqlalchemy import create_engine, func
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.sql.elements import ColumnElement
 
 from .config import ROLLPIG_TIMEZONE, settings
+
+
+TransactionResult = TypeVar("TransactionResult")
+SQLITE_LOCK_RETRY_ATTEMPTS = 2
 
 
 class Base(DeclarativeBase):
@@ -45,6 +52,28 @@ def database_datetime_for_response(session: Session, value: dt.datetime) -> dt.d
         return value.replace(tzinfo=ROLLPIG_TIMEZONE)
     # SQLite CURRENT_TIMESTAMP 使用 UTC，测试与本地部署继续按 UTC 解释。
     return value.replace(tzinfo=dt.timezone.utc)
+
+
+def run_transaction_with_sqlite_lock_retry(
+    session: Session,
+    operation: Callable[[], TransactionResult],
+) -> TransactionResult:
+    """SQLite 写锁冲突时回滚并重跑完整事务，避免把未完成写入误判为幂等成功。"""
+
+    for attempt in range(SQLITE_LOCK_RETRY_ATTEMPTS):
+        try:
+            return operation()
+        except OperationalError as error:
+            is_sqlite_lock = (
+                session.get_bind().dialect.name == "sqlite"
+                and "locked" in str(error.orig).casefold()
+            )
+            # 必须结束旧的读取快照后才能重试；非 SQLite 锁错误仍回滚后原样抛出。
+            session.rollback()
+            if not is_sqlite_lock or attempt + 1 >= SQLITE_LOCK_RETRY_ATTEMPTS:
+                raise
+
+    raise RuntimeError("SQLite transaction retry exhausted")
 
 
 def get_session():
