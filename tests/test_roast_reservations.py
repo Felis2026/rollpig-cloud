@@ -54,6 +54,39 @@ from rollpig_cloud.services.reservations import activate_target_reservations, pr
 
 
 class CloudRoastReservationTests(unittest.TestCase):
+    def test_makeup_before_or_after_prepare_never_activates_reservation(self):
+        from rollpig_cloud.routers.daily_rolls import makeup_daily_roll
+        from rollpig_cloud.routers.roast_reservations import prepare
+        from rollpig_cloud.schemas import DailyRollGetOrCreateRequest
+        from rollpig_cloud.services.reservations import activate_if_target_already_rolled
+
+        yesterday = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date() - dt.timedelta(days=1)
+        for makeup_first in (True, False):
+            with self.subTest(makeup_first=makeup_first):
+                target = f"target-{makeup_first}"
+                request = self._request(attacker_id=f"owner-{makeup_first}", target_id=target, date_str=yesterday)
+                makeup_request = DailyRollGetOrCreateRequest(user_id=target, proposed_pig_id="pig", date_str=yesterday)
+                if makeup_first:
+                    makeup_daily_roll(makeup_request, self.session)
+                created = prepare(request, self.session)
+                self.assertEqual(created.status, "reservation_created")
+                if not makeup_first:
+                    makeup_daily_roll(makeup_request, self.session)
+                repeated = prepare(request, self.session)
+                self.assertEqual(repeated.status, "already_joined")
+                joined = prepare(request.model_copy(update={"attacker_id": f"joiner-{makeup_first}"}), self.session)
+                self.assertEqual(joined.status, "reservation_joined")
+                self.assertEqual(activate_if_target_already_rolled(self.session, date_str=yesterday, target_id=target), 0)
+                self.assertEqual(activate_target_reservations(self.session, date_str=yesterday, target_id=target, target_pig_id="pig"), 0)
+                self.session.commit()
+                self.session.expire_all()
+                row = self.session.scalar(select(RoastReservation).where(RoastReservation.target_id == target))
+                self.assertEqual(row.status, "pending")
+                self.assertIsNone(row.ready_at)
+                self.assertFalse(row.target_pig_id)
+        claimed = claim(self._claim_request(date_str=yesterday), self.session)
+        self.assertFalse(claimed.items)
+
     def setUp(self) -> None:
         self.engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
         Base.metadata.create_all(self.engine)
