@@ -167,7 +167,7 @@ def apply_daily_feed(
         .where(DailyRoll.date_str == date_str, DailyRoll.user_id == user_id)
         .with_for_update()
     ).scalar_one_or_none()
-    if daily_roll is None:
+    if daily_roll is None or (daily_roll.appearance_snapshot or {}).get("is_makeup") is True:
         return DailyFeedResult(
             status="no_daily_pig",
             user_id=user_id,

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import datetime as dt
+from functools import wraps
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from ..auth import verify_token
@@ -26,6 +27,22 @@ from ..services.reservations import activate_target_reservations
 from ..services.roast_refills import mark_group_active_users
 
 router = APIRouter(prefix="/v1/daily-rolls", tags=["daily-rolls"], dependencies=[Depends(verify_token)])
+
+
+def _retry_roll_conflicts(handler):
+    """跨日期成长竞争时回滚整笔事务重试，最多三次，不吞掉其他数据库错误。"""
+    @wraps(handler)
+    def wrapped(req, session=Depends(get_session), identity=Depends(verify_token)):
+        for attempt in range(3):
+            try:
+                return handler(req, session, identity)
+            except (IntegrityError, OperationalError) as error:
+                session.rollback()
+                code = error.orig.args[0] if error.orig.args else None
+                retryable = isinstance(error, IntegrityError) or code in (1205, 1213)
+                if not retryable or attempt == 2:
+                    raise
+    return wrapped
 
 
 def _ensure_group_roll(session: Session, group_id: str, user_id: str, pig_id: str, date_str: dt.date) -> None:
@@ -68,6 +85,7 @@ def _reconcile_reservations_after_commit(
 
 
 @router.post("/get-or-create", response_model=DailyRollLookupResponse)
+@_retry_roll_conflicts
 def get_or_create_daily_roll(
     req: DailyRollGetOrCreateRequest,
     session: Session = Depends(get_session),
@@ -77,6 +95,10 @@ def get_or_create_daily_roll(
         select(DailyRoll).where(DailyRoll.user_id == req.user_id, DailyRoll.date_str == req.date_str)
     ).scalar_one_or_none()
     if existing:
+        if (existing.appearance_snapshot or {}).get("is_makeup") is True:
+            record_key_mutation_outcome(session, identity, operation="POST /v1/daily-rolls/get-or-create", idempotent_hits=1)
+            session.commit()
+            return build_lookup_response(session, daily_roll=existing, created=False)
         _ensure_group_roll(session, req.group_id, req.user_id, existing.pig_id, req.date_str)
         record_key_mutation_outcome(
             session,
@@ -132,7 +154,13 @@ def get_or_create_daily_roll(
         session.rollback()
         existing = session.execute(
             select(DailyRoll).where(DailyRoll.user_id == req.user_id, DailyRoll.date_str == req.date_str)
-        ).scalar_one()
+        ).scalar_one_or_none()
+        if existing is None:
+            raise
+        if (existing.appearance_snapshot or {}).get("is_makeup") is True:
+            record_key_mutation_outcome(session, identity, operation="POST /v1/daily-rolls/get-or-create", idempotent_hits=1)
+            session.commit()
+            return build_lookup_response(session, daily_roll=existing, created=False)
         _ensure_group_roll(session, req.group_id, req.user_id, existing.pig_id, req.date_str)
         record_key_mutation_outcome(
             session,
@@ -154,6 +182,7 @@ def get_or_create_daily_roll(
 
 
 @router.post("/makeup", response_model=DailyRollLookupResponse)
+@_retry_roll_conflicts
 def makeup_daily_roll(
     req: DailyRollGetOrCreateRequest,
     session: Session = Depends(get_session),
@@ -169,6 +198,8 @@ def makeup_daily_roll(
     )
     existing = session.execute(query).scalar_one_or_none()
     if existing is not None:
+        record_key_mutation_outcome(session, identity, operation="POST /v1/daily-rolls/makeup", idempotent_hits=1)
+        session.commit()
         return build_lookup_response(session, daily_roll=existing, created=False)
     # ================================ 原子补签与成长 ================================ #
     try:
@@ -197,6 +228,8 @@ def makeup_daily_roll(
         existing = session.execute(query).scalar_one_or_none()
         if existing is None:
             raise
+        record_key_mutation_outcome(session, identity, operation="POST /v1/daily-rolls/makeup", idempotent_hits=1)
+        session.commit()
         return build_lookup_response(session, daily_roll=existing, created=False)
 
 
