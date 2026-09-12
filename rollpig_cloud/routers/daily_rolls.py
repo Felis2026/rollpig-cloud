@@ -150,6 +150,56 @@ def get_or_create_daily_roll(
         return build_lookup_response(session, daily_roll=existing, created=False)
 
 
+# ================================ 昨日补签 ================================ #
+
+
+@router.post("/makeup", response_model=DailyRollLookupResponse)
+def makeup_daily_roll(
+    req: DailyRollGetOrCreateRequest,
+    session: Session = Depends(get_session),
+    identity: ApiKeyIdentity = Depends(verify_token),
+):
+    """只补昨天的收藏成长；唯一抽取行先占位，不登记群活动或触发预约。"""
+    # ================================ 日期与既有记录 ================================ #
+    today = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date()
+    if req.date_str != today - dt.timedelta(days=1):
+        raise HTTPException(status_code=422, detail="只能补签昨天的小猪")
+    query = select(DailyRoll).where(
+        DailyRoll.user_id == req.user_id, DailyRoll.date_str == req.date_str,
+    )
+    existing = session.execute(query).scalar_one_or_none()
+    if existing is not None:
+        return build_lookup_response(session, daily_roll=existing, created=False)
+    # ================================ 原子补签与成长 ================================ #
+    try:
+        created = DailyRoll(
+            user_id=req.user_id, pig_id=req.proposed_pig_id, date_str=req.date_str,
+            appearance_snapshot={"is_makeup": True},
+        )
+        session.add(created)
+        session.flush()
+        progress = apply_created_roll_progress(session, req.user_id, req.proposed_pig_id)
+        for field in (
+            "is_new_pig", "previous_copies", "copies_after_roll",
+            "previous_expert_level", "expert_level_after_roll",
+            "collection_size_after_roll", "previous_duplicate_streak",
+            "duplicate_streak_after_roll",
+        ):
+            setattr(created, field, getattr(progress, field))
+        record_key_mutation_outcome(
+            session, identity, operation="POST /v1/daily-rolls/makeup", created_records=1,
+        )
+        session.commit()
+        return build_lookup_response(session, daily_roll=created, created=True)
+    except IntegrityError:
+        # 同日唯一行竞争失败时整笔回滚，再读取获胜请求的结果。
+        session.rollback()
+        existing = session.execute(query).scalar_one_or_none()
+        if existing is None:
+            raise
+        return build_lookup_response(session, daily_roll=existing, created=False)
+
+
 @router.get("/by-date", response_model=DailyRollLookupResponse)
 def get_daily_roll_by_date(user_id: str, date_str: dt.date, session: Session = Depends(get_session)):
     existing = session.execute(
@@ -207,7 +257,12 @@ def complete_daily_roll_snapshot(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="旧抽取记录不支持补全历史快照")
 
     payload = _snapshot_payload(req)
-    has_existing_snapshot = existing.resource_version is not None or existing.appearance_snapshot is not None
+    if (existing.appearance_snapshot or {}).get("is_makeup") is True:
+        payload["is_makeup"] = True
+    has_existing_snapshot = existing.resource_version is not None or (
+        existing.appearance_snapshot is not None
+        and existing.appearance_snapshot != {"is_makeup": True}
+    )
     if has_existing_snapshot:
         stored_payload = existing.appearance_snapshot if isinstance(existing.appearance_snapshot, dict) else {}
         if str(existing.resource_version or "") != req.resource_version or stored_payload != payload:

@@ -25,6 +25,7 @@ class DailyRollGetOrCreateRequest(BaseModel):
 
 
 class DailyRollLookupResponse(BaseModel):
+    is_makeup: bool = False
     pig_id: str | None = None
     created: bool = False
     is_new_pig: bool = False

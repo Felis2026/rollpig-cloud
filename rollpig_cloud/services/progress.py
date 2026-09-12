@@ -358,6 +358,7 @@ def build_lookup_response(
 
     return DailyRollLookupResponse(
         pig_id=pig_id,
+        is_makeup=(daily_roll.appearance_snapshot or {}).get("is_makeup") is True,
         created=created,
         is_new_pig=response_is_new,
         previous_copies=response_previous_copies,
