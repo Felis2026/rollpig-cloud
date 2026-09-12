@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import datetime as dt
+from functools import wraps
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from ..auth import verify_token
@@ -26,6 +27,22 @@ from ..services.reservations import activate_target_reservations
 from ..services.roast_refills import mark_group_active_users
 
 router = APIRouter(prefix="/v1/daily-rolls", tags=["daily-rolls"], dependencies=[Depends(verify_token)])
+
+
+def _retry_roll_conflicts(handler):
+    """跨日期成长竞争时回滚整笔事务重试，最多三次，不吞掉其他数据库错误。"""
+    @wraps(handler)
+    def wrapped(req, session=Depends(get_session), identity=Depends(verify_token)):
+        for attempt in range(3):
+            try:
+                return handler(req, session, identity)
+            except (IntegrityError, OperationalError) as error:
+                session.rollback()
+                code = error.orig.args[0] if error.orig.args else None
+                retryable = isinstance(error, IntegrityError) or code in (1205, 1213)
+                if not retryable or attempt == 2:
+                    raise
+    return wrapped
 
 
 def _ensure_group_roll(session: Session, group_id: str, user_id: str, pig_id: str, date_str: dt.date) -> None:
@@ -68,6 +85,7 @@ def _reconcile_reservations_after_commit(
 
 
 @router.post("/get-or-create", response_model=DailyRollLookupResponse)
+@_retry_roll_conflicts
 def get_or_create_daily_roll(
     req: DailyRollGetOrCreateRequest,
     session: Session = Depends(get_session),
@@ -77,6 +95,10 @@ def get_or_create_daily_roll(
         select(DailyRoll).where(DailyRoll.user_id == req.user_id, DailyRoll.date_str == req.date_str)
     ).scalar_one_or_none()
     if existing:
+        if (existing.appearance_snapshot or {}).get("is_makeup") is True:
+            record_key_mutation_outcome(session, identity, operation="POST /v1/daily-rolls/get-or-create", idempotent_hits=1)
+            session.commit()
+            return build_lookup_response(session, daily_roll=existing, created=False)
         _ensure_group_roll(session, req.group_id, req.user_id, existing.pig_id, req.date_str)
         record_key_mutation_outcome(
             session,
@@ -132,7 +154,13 @@ def get_or_create_daily_roll(
         session.rollback()
         existing = session.execute(
             select(DailyRoll).where(DailyRoll.user_id == req.user_id, DailyRoll.date_str == req.date_str)
-        ).scalar_one()
+        ).scalar_one_or_none()
+        if existing is None:
+            raise
+        if (existing.appearance_snapshot or {}).get("is_makeup") is True:
+            record_key_mutation_outcome(session, identity, operation="POST /v1/daily-rolls/get-or-create", idempotent_hits=1)
+            session.commit()
+            return build_lookup_response(session, daily_roll=existing, created=False)
         _ensure_group_roll(session, req.group_id, req.user_id, existing.pig_id, req.date_str)
         record_key_mutation_outcome(
             session,
@@ -147,6 +175,61 @@ def get_or_create_daily_roll(
             user_id=req.user_id,
             pig_id=existing.pig_id,
         )
+        return build_lookup_response(session, daily_roll=existing, created=False)
+
+
+# ================================ 昨日补签 ================================ #
+
+
+@router.post("/makeup", response_model=DailyRollLookupResponse)
+@_retry_roll_conflicts
+def makeup_daily_roll(
+    req: DailyRollGetOrCreateRequest,
+    session: Session = Depends(get_session),
+    identity: ApiKeyIdentity = Depends(verify_token),
+):
+    """只补昨天的收藏成长；唯一抽取行先占位，不登记群活动或触发预约。"""
+    # ================================ 日期与既有记录 ================================ #
+    today = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date()
+    if req.date_str != today - dt.timedelta(days=1):
+        raise HTTPException(status_code=422, detail="只能补签昨天的小猪")
+    query = select(DailyRoll).where(
+        DailyRoll.user_id == req.user_id, DailyRoll.date_str == req.date_str,
+    )
+    existing = session.execute(query).scalar_one_or_none()
+    if existing is not None:
+        record_key_mutation_outcome(session, identity, operation="POST /v1/daily-rolls/makeup", idempotent_hits=1)
+        session.commit()
+        return build_lookup_response(session, daily_roll=existing, created=False)
+    # ================================ 原子补签与成长 ================================ #
+    try:
+        created = DailyRoll(
+            user_id=req.user_id, pig_id=req.proposed_pig_id, date_str=req.date_str,
+            appearance_snapshot={"is_makeup": True},
+        )
+        session.add(created)
+        session.flush()
+        progress = apply_created_roll_progress(session, req.user_id, req.proposed_pig_id)
+        for field in (
+            "is_new_pig", "previous_copies", "copies_after_roll",
+            "previous_expert_level", "expert_level_after_roll",
+            "collection_size_after_roll", "previous_duplicate_streak",
+            "duplicate_streak_after_roll",
+        ):
+            setattr(created, field, getattr(progress, field))
+        record_key_mutation_outcome(
+            session, identity, operation="POST /v1/daily-rolls/makeup", created_records=1,
+        )
+        session.commit()
+        return build_lookup_response(session, daily_roll=created, created=True)
+    except IntegrityError:
+        # 同日唯一行竞争失败时整笔回滚，再读取获胜请求的结果。
+        session.rollback()
+        existing = session.execute(query).scalar_one_or_none()
+        if existing is None:
+            raise
+        record_key_mutation_outcome(session, identity, operation="POST /v1/daily-rolls/makeup", idempotent_hits=1)
+        session.commit()
         return build_lookup_response(session, daily_roll=existing, created=False)
 
 
@@ -207,7 +290,12 @@ def complete_daily_roll_snapshot(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="旧抽取记录不支持补全历史快照")
 
     payload = _snapshot_payload(req)
-    has_existing_snapshot = existing.resource_version is not None or existing.appearance_snapshot is not None
+    if (existing.appearance_snapshot or {}).get("is_makeup") is True:
+        payload["is_makeup"] = True
+    has_existing_snapshot = existing.resource_version is not None or (
+        existing.appearance_snapshot is not None
+        and existing.appearance_snapshot != {"is_makeup": True}
+    )
     if has_existing_snapshot:
         stored_payload = existing.appearance_snapshot if isinstance(existing.appearance_snapshot, dict) else {}
         if str(existing.resource_version or "") != req.resource_version or stored_payload != payload:

@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 from fastapi import HTTPException
 from pydantic import ValidationError
 from sqlalchemy import create_engine, inspect, select, text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 os.environ.setdefault("ROLLPIG_CLOUD_DATABASE_URL", "sqlite+pysqlite:///:memory:")
@@ -28,6 +28,7 @@ from rollpig_cloud.routers.daily_rolls import (
     complete_daily_roll_snapshot,
     get_daily_roll_by_date,
     get_or_create_daily_roll,
+    makeup_daily_roll,
 )
 from rollpig_cloud.routers.events import list_events
 from rollpig_cloud.schemas import (
@@ -42,6 +43,127 @@ DATE = dt.date(2026, 8, 23)
 
 
 class CloudDailyRollSnapshotTests(unittest.TestCase):
+    def test_today_and_makeup_concurrently_preserve_both_draws(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        today = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date()
+        barrier = Barrier(2)
+        with tempfile.TemporaryDirectory() as directory:
+            engine = create_engine(f"sqlite+pysqlite:///{Path(directory) / 'cross-date.db'}")
+            Base.metadata.create_all(engine)
+            def submit(makeup):
+                with Session(engine, expire_on_commit=False) as session:
+                    request = DailyRollGetOrCreateRequest(
+                        user_id="user", proposed_pig_id="pig",
+                        date_str=today - dt.timedelta(days=1) if makeup else today,
+                    )
+                    barrier.wait(timeout=5)
+                    return (makeup_daily_roll if makeup else get_or_create_daily_roll)(request, session)
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    results = list(executor.map(submit, (True, False)))
+                self.assertTrue(all(result.created for result in results))
+                with Session(engine) as session:
+                    self.assertEqual(len(session.scalars(select(DailyRoll)).all()), 2)
+                    self.assertEqual(session.scalar(select(UserPigProgress)).copies, 2)
+            finally:
+                engine.dispose()
+
+    def test_growth_conflict_retry_is_bounded(self):
+        yesterday = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date() - dt.timedelta(days=1)
+        request = DailyRollGetOrCreateRequest(user_id="user", proposed_pig_id="pig", date_str=yesterday)
+        with patch("rollpig_cloud.routers.daily_rolls.apply_created_roll_progress", side_effect=IntegrityError("insert", {}, Exception("duplicate"))) as progress:
+            with self.assertRaises(IntegrityError):
+                makeup_daily_roll(request, self.session)
+        self.assertEqual(progress.call_count, 3)
+        self.assertEqual(self.session.scalars(select(DailyRoll)).all(), [])
+
+    def test_makeup_cannot_activate_normal_roll_or_feed(self):
+        from rollpig_cloud.services.progress import apply_daily_feed
+        yesterday = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date() - dt.timedelta(days=1)
+        request = DailyRollGetOrCreateRequest(user_id="user", proposed_pig_id="pig", date_str=yesterday, group_id="100")
+        makeup_daily_roll(request, self.session)
+        with (
+            patch("rollpig_cloud.routers.daily_rolls._ensure_group_roll") as group,
+            patch("rollpig_cloud.routers.daily_rolls._reconcile_reservations_after_commit") as reconcile,
+            patch("rollpig_cloud.routers.daily_rolls.record_key_mutation_outcome") as record,
+        ):
+            result = get_or_create_daily_roll(request, self.session)
+            makeup_daily_roll(request, self.session)
+        self.assertFalse(result.created)
+        group.assert_not_called()
+        reconcile.assert_not_called()
+        self.assertEqual(record.call_args.kwargs["idempotent_hits"], 1)
+        for source in ("roast", "reservation"):
+            result = apply_daily_feed(self.session, date_str=yesterday, user_id="user", source_type=source, source_id="event")
+            self.assertEqual(result.status, "no_daily_pig")
+
+    def test_cross_date_growth_conflict_retries_whole_transaction(self):
+        from rollpig_cloud.services.progress import apply_created_roll_progress
+        yesterday = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date() - dt.timedelta(days=1)
+        for handler, date in ((makeup_daily_roll, yesterday), (get_or_create_daily_roll, yesterday + dt.timedelta(days=1))):
+            with self.subTest(handler=handler.__name__):
+                request = DailyRollGetOrCreateRequest(user_id=handler.__name__, proposed_pig_id="pig", date_str=date)
+                calls = 0
+                def conflict_once(session, user_id, pig_id):
+                    nonlocal calls
+                    calls += 1
+                    if calls == 1:
+                        raise IntegrityError("insert", {}, Exception("duplicate growth row"))
+                    return apply_created_roll_progress(session, user_id, pig_id)
+                with patch("rollpig_cloud.routers.daily_rolls.apply_created_roll_progress", side_effect=conflict_once):
+                    result = handler(request, self.session)
+                self.assertTrue(result.created)
+                self.assertEqual(result.copies, 1)
+                self.assertEqual(calls, 2)
+
+    def test_concurrent_makeup_uses_one_daily_row_and_one_growth(self):
+        from concurrent.futures import ThreadPoolExecutor
+        yesterday = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date() - dt.timedelta(days=1)
+        with tempfile.TemporaryDirectory() as directory:
+            engine = create_engine(f"sqlite+pysqlite:///{Path(directory) / 'makeup.db'}")
+            Base.metadata.create_all(engine)
+            def submit(index):
+                with Session(engine, expire_on_commit=False) as session:
+                    return makeup_daily_roll(DailyRollGetOrCreateRequest(
+                        user_id="user", proposed_pig_id=f"pig-{index}", date_str=yesterday,
+                    ), session)
+            try:
+                with ThreadPoolExecutor(max_workers=4) as executor:
+                    results = list(executor.map(submit, range(4)))
+                self.assertEqual(sum(result.created for result in results), 1)
+                self.assertEqual(len({result.pig_id for result in results}), 1)
+                with Session(engine) as session:
+                    self.assertEqual(len(session.execute(select(DailyRoll)).scalars().all()), 1)
+                    self.assertEqual(sum(row.copies for row in session.execute(select(UserPigProgress)).scalars()), 1)
+            finally:
+                engine.dispose()
+
+    def test_makeup_grows_once_without_group_or_reservation_side_effects(self):
+        yesterday = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date() - dt.timedelta(days=1)
+        request = DailyRollGetOrCreateRequest(
+            user_id="user", proposed_pig_id="pig", date_str=yesterday, group_id="100",
+        )
+        with patch("rollpig_cloud.routers.daily_rolls.activate_target_reservations") as activate:
+            first = makeup_daily_roll(request, self.session)
+            again = makeup_daily_roll(request, self.session)
+        self.assertTrue(first.created)
+        self.assertTrue(first.is_makeup)
+        self.assertFalse(again.created)
+        self.assertEqual(again.copies, 1)
+        activate.assert_not_called()
+        from rollpig_cloud.models import GroupRoll
+        self.assertEqual(self.session.execute(select(GroupRoll)).scalars().all(), [])
+        complete_daily_roll_snapshot(DailyRollSnapshotRequest(
+            user_id="user", pig_id="pig", date_str=yesterday,
+            resource_version="builtin", resolved_variant_level=0,
+            resolved_image_name="pig.png", unlocked_variant_levels=[], unlocked_variant_fields=[],
+        ), self.session)
+        self.session.expire_all()
+        self.assertTrue(get_daily_roll_by_date("user", yesterday, self.session).is_makeup)
+        with self.assertRaises(HTTPException):
+            makeup_daily_roll(request.model_copy(update={"date_str": yesterday - dt.timedelta(days=1)}), self.session)
+
     def setUp(self) -> None:
         self.engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
         Base.metadata.create_all(self.engine)

@@ -62,6 +62,9 @@ def prepare_reservation(session: Session, req: RoastReservationPrepareRequest) -
     target_roll = session.execute(
         select(DailyRoll).where(DailyRoll.date_str == req.date_str, DailyRoll.user_id == req.target_id)
     ).scalar_one_or_none()
+    # 补签不代表目标昨天到场，不能放行普通烧烤或触发历史预约。
+    if target_roll is not None and (target_roll.appearance_snapshot or {}).get("is_makeup") is True:
+        target_roll = None
     reservation = session.execute(
         select(RoastReservation)
         .where(
@@ -193,6 +196,13 @@ def activate_target_reservations(
 ) -> int:
     """把目标当天所有 pending 预约原子切换为 ready；重复调用保持幂等。"""
 
+    # 在状态转换入口再守一次，覆盖抽取侧对账和直接调用者。
+    target_roll = session.execute(
+        select(DailyRoll).where(DailyRoll.date_str == date_str, DailyRoll.user_id == target_id)
+    ).scalar_one_or_none()
+    if target_roll is not None and (target_roll.appearance_snapshot or {}).get("is_makeup") is True:
+        return 0
+
     reservations = session.execute(
         select(RoastReservation)
         .where(
@@ -221,7 +231,7 @@ def activate_if_target_already_rolled(
     target_roll = session.execute(
         select(DailyRoll).where(DailyRoll.date_str == date_str, DailyRoll.user_id == target_id)
     ).scalar_one_or_none()
-    if target_roll is None:
+    if target_roll is None or (target_roll.appearance_snapshot or {}).get("is_makeup") is True:
         return 0
     return activate_target_reservations(
         session,
