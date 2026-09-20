@@ -9,8 +9,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..auth import verify_token
+from ..config import rollpig_today
 from ..db import get_session, run_transaction_with_sqlite_lock_retry
-from ..models import DailyRoll, RoastReservation, RoastReservationMessage, UnrolledRoastAttempt
+from ..models import DailyRoll, GroupRoll, RoastReservation, RoastReservationMessage, UnrolledRoastAttempt
 from ..schemas import (
     RoastReservationClaimRequest,
     RoastReservationClaimResponse,
@@ -83,6 +84,9 @@ def join_by_message(req: RoastReservationReplyJoinRequest, session: Session = De
     """按通知加入既有预约，用户今日小猪由账本读取，不信任客户端伪造。"""
 
     def transaction():
+        # 请求日期不能代替服务端业务日期；重放旧通知也不能修改历史参与名单。
+        if req.date_str != rollpig_today():
+            return RoastReservationPrepareResponse(status="reservation_closed")
         binding = session.scalar(select(RoastReservationMessage).where(
             RoastReservationMessage.bot_id == req.bot_id,
             RoastReservationMessage.group_id == req.group_id,
@@ -111,10 +115,29 @@ def join_by_message(req: RoastReservationReplyJoinRequest, session: Session = De
             target_name=reservation.target_name, group_id=req.group_id,
             delivery_bot_id=req.bot_id, date_str=req.date_str,
         ), expected_reservation_id=reservation.reservation_id)
+        if response.status in {"reservation_joined", "already_joined"}:
+            # 与加入同事务登记群内出现记录；重复通知不改写首次出现时间和形态。
+            group_roll = session.scalar(select(GroupRoll).where(
+                GroupRoll.date_str == req.date_str,
+                GroupRoll.group_id == req.group_id,
+                GroupRoll.user_id == req.attacker_id,
+            ))
+            if group_roll is None:
+                session.add(GroupRoll(
+                    date_str=req.date_str, group_id=req.group_id,
+                    user_id=req.attacker_id, pig_id=roll.pig_id,
+                ))
         session.commit()
         return response
 
-    return run_transaction_with_sqlite_lock_retry(session, transaction)
+    # 并发的正常群内登记可能先插入同一记录；整笔回滚重试，不留下半次加入。
+    for attempt in range(2):
+        try:
+            return run_transaction_with_sqlite_lock_retry(session, transaction)
+        except IntegrityError:
+            session.rollback()
+            if attempt:
+                raise
 
 
 @router.post("/unrolled-attempt", response_model=UnrolledRoastAttemptResponse)

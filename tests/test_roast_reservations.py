@@ -23,6 +23,7 @@ from rollpig_cloud.models import (
     Collection,
     DailyRoll,
     GroupProtection,
+    GroupRoll,
     RoastEvent,
     RoastReservation,
     RoastReservationParticipant,
@@ -103,7 +104,13 @@ class CloudRoastReservationTests(unittest.TestCase):
         joined = join_by_message(request, self.session)
         self.assertEqual(joined.status, "reservation_joined")
         self.assertEqual(len(joined.reservation.participants), 2)
+        group_roll = self.session.scalar(select(GroupRoll).where(GroupRoll.user_id == "b", GroupRoll.group_id == "100"))
+        self.assertEqual(group_roll.pig_id, "pig-b")
+        seen_at = group_roll.seen_at
         self.assertEqual(join_by_message(request, self.session).status, "already_joined")
+        self.session.expire_all()
+        self.assertEqual(group_roll.seen_at, seen_at)
+        self.assertEqual(len(self.session.scalars(select(GroupRoll).where(GroupRoll.user_id == "b")).all()), 1)
         self.assertTrue(bind_message(bind.model_copy(update={"message_id": "901"}), self.session)["ok"])
         chained = join_by_message(request.model_copy(update={"message_id": "901", "attacker_id": "c"}), self.session)
         self.assertEqual(len(chained.reservation.participants), 3)
@@ -147,6 +154,22 @@ class CloudRoastReservationTests(unittest.TestCase):
         self.assertEqual(join_by_message(request, self.session).status, "reservation_closed")
         self.assertEqual(len(self.session.scalars(select(RoastReservation)).all()), 1)
 
+    def test_reply_join_rejects_replayed_historical_and_future_dates(self):
+        from rollpig_cloud.routers.roast_reservations import bind_message, join_by_message
+        from rollpig_cloud.schemas import RoastReservationBindMessageRequest, RoastReservationReplyJoinRequest
+
+        created = prepare_reservation(self.session, self._request())
+        self.session.add(DailyRoll(user_id="b", date_str=self._request().date_str, pig_id="pig-b"))
+        self.session.commit()
+        scope = dict(bot_id="bot-1", group_id="100", message_id="900", date_str=self._request().date_str)
+        bind_message(RoastReservationBindMessageRequest(reservation_id=created.reservation.reservation_id, **scope), self.session)
+        request = RoastReservationReplyJoinRequest(attacker_id="b", **scope)
+        for offset in (-1, 1):
+            with patch("rollpig_cloud.routers.roast_reservations.rollpig_today", return_value=scope["date_str"] + dt.timedelta(days=offset)):
+                self.assertEqual(join_by_message(request, self.session).status, "reservation_closed")
+            self.assertEqual(len(self.session.scalars(select(RoastReservationParticipant)).all()), 1)
+            self.assertIsNone(self.session.scalar(select(GroupRoll).where(GroupRoll.user_id == "b")))
+
     def test_makeup_before_or_after_prepare_never_activates_reservation(self):
         from rollpig_cloud.routers.daily_rolls import makeup_daily_roll
         from rollpig_cloud.routers.roast_reservations import prepare
@@ -181,6 +204,9 @@ class CloudRoastReservationTests(unittest.TestCase):
         self.assertFalse(claimed.items)
 
     def setUp(self) -> None:
+        clock_patch = patch("rollpig_cloud.routers.roast_reservations.rollpig_today", return_value=dt.date(2026, 8, 7))
+        clock_patch.start()
+        self.addCleanup(clock_patch.stop)
         self.engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
         Base.metadata.create_all(self.engine)
         self.session = Session(self.engine, expire_on_commit=False)
