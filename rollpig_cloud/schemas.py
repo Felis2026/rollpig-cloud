@@ -412,6 +412,22 @@ class RoastReservationPrepareResponse(BaseModel):
     protection_broken: bool = False
 
 
+class RoastReservationMessageRequest(BaseModel):
+    bot_id: str = Field(min_length=1, max_length=64)
+    group_id: str = Field(min_length=1, max_length=64)
+    message_id: str = Field(min_length=1, max_length=64)
+    date_str: dt.date
+
+
+class RoastReservationBindMessageRequest(RoastReservationMessageRequest):
+    reservation_id: str = Field(min_length=1, max_length=64)
+
+
+class RoastReservationReplyJoinRequest(RoastReservationMessageRequest):
+    attacker_id: str = Field(min_length=1, max_length=64)
+    attacker_name: str = Field(default="", max_length=128)
+
+
 class RoastReservationOwnedResponse(BaseModel):
     has_owned: bool
 

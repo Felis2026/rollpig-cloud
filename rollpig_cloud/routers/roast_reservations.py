@@ -4,13 +4,14 @@ import datetime as dt
 import uuid
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..auth import verify_token
+from ..config import rollpig_today
 from ..db import get_session, run_transaction_with_sqlite_lock_retry
-from ..models import RoastReservation, UnrolledRoastAttempt
+from ..models import DailyRoll, GroupRoll, RoastReservation, RoastReservationMessage, UnrolledRoastAttempt
 from ..schemas import (
     RoastReservationClaimRequest,
     RoastReservationClaimResponse,
@@ -21,6 +22,8 @@ from ..schemas import (
     RoastReservationOwnedResponse,
     RoastReservationPrepareRequest,
     RoastReservationPrepareResponse,
+    RoastReservationBindMessageRequest,
+    RoastReservationReplyJoinRequest,
     UnrolledRoastAttemptRequest,
     UnrolledRoastAttemptResponse,
 )
@@ -35,6 +38,106 @@ router = APIRouter(
     dependencies=[Depends(verify_token)],
 )
 ROAST_RESERVATION_CLAIM_TIMEOUT = dt.timedelta(minutes=5)
+
+
+# ================================ 回复消息加入预约 ================================ #
+
+
+@router.post("/bind-message")
+def bind_message(req: RoastReservationBindMessageRequest, session: Session = Depends(get_session)):
+    """持久化通知关联；重试幂等，同一消息不可指向另一场预约。"""
+
+    def transaction():
+        reservation = session.scalar(select(RoastReservation).where(
+            RoastReservation.reservation_id == req.reservation_id,
+            RoastReservation.group_id == req.group_id,
+            RoastReservation.date_str == req.date_str,
+        ))
+        if reservation is None:
+            return {"ok": False}
+        existing = session.scalar(select(RoastReservationMessage).where(
+            RoastReservationMessage.bot_id == req.bot_id,
+            RoastReservationMessage.group_id == req.group_id,
+            RoastReservationMessage.message_id == req.message_id,
+        ))
+        if existing is not None:
+            return {"ok": existing.reservation_id == req.reservation_id}
+        # 留七天用于过期回复识别，不永久积累通知关联。
+        session.execute(delete(RoastReservationMessage).where(
+            RoastReservationMessage.date_str < req.date_str - dt.timedelta(days=7)
+        ))
+        session.add(RoastReservationMessage(**req.model_dump()))
+        session.commit()
+        return {"ok": True}
+
+    for attempt in range(2):
+        try:
+            return run_transaction_with_sqlite_lock_retry(session, transaction)
+        except IntegrityError:
+            session.rollback()
+            if attempt:
+                raise
+
+
+@router.post("/join-by-message", response_model=RoastReservationPrepareResponse)
+def join_by_message(req: RoastReservationReplyJoinRequest, session: Session = Depends(get_session)):
+    """按通知加入既有预约，用户今日小猪由账本读取，不信任客户端伪造。"""
+
+    def transaction():
+        # 请求日期不能代替服务端业务日期；重放旧通知也不能修改历史参与名单。
+        if req.date_str != rollpig_today():
+            return RoastReservationPrepareResponse(status="reservation_closed")
+        binding = session.scalar(select(RoastReservationMessage).where(
+            RoastReservationMessage.bot_id == req.bot_id,
+            RoastReservationMessage.group_id == req.group_id,
+            RoastReservationMessage.message_id == req.message_id,
+        ))
+        if binding is None:
+            return RoastReservationPrepareResponse(status="message_not_found")
+        reservation = session.scalar(select(RoastReservation).where(
+            RoastReservation.reservation_id == binding.reservation_id,
+            RoastReservation.group_id == req.group_id,
+            RoastReservation.date_str == req.date_str,
+        ).with_for_update())
+        if reservation is None or reservation.status != "pending":
+            return RoastReservationPrepareResponse(status="reservation_closed")
+        if reservation.target_id == req.attacker_id:
+            return RoastReservationPrepareResponse(status="self_target")
+        roll = session.scalar(select(DailyRoll).where(
+            DailyRoll.user_id == req.attacker_id,
+            DailyRoll.date_str == req.date_str,
+        ))
+        if roll is None or (roll.appearance_snapshot or {}).get("is_makeup") is True:
+            return RoastReservationPrepareResponse(status="attacker_unrolled")
+        response = prepare_reservation(session, RoastReservationPrepareRequest(
+            attacker_id=req.attacker_id, attacker_name=req.attacker_name,
+            attacker_pig_id=roll.pig_id, target_id=reservation.target_id,
+            target_name=reservation.target_name, group_id=req.group_id,
+            delivery_bot_id=req.bot_id, date_str=req.date_str,
+        ), expected_reservation_id=reservation.reservation_id)
+        if response.status in {"reservation_joined", "already_joined"}:
+            # 与加入同事务登记群内出现记录；重复通知不改写首次出现时间和形态。
+            group_roll = session.scalar(select(GroupRoll).where(
+                GroupRoll.date_str == req.date_str,
+                GroupRoll.group_id == req.group_id,
+                GroupRoll.user_id == req.attacker_id,
+            ))
+            if group_roll is None:
+                session.add(GroupRoll(
+                    date_str=req.date_str, group_id=req.group_id,
+                    user_id=req.attacker_id, pig_id=roll.pig_id,
+                ))
+        session.commit()
+        return response
+
+    # 并发的正常群内登记可能先插入同一记录；整笔回滚重试，不留下半次加入。
+    for attempt in range(2):
+        try:
+            return run_transaction_with_sqlite_lock_retry(session, transaction)
+        except IntegrityError:
+            session.rollback()
+            if attempt:
+                raise
 
 
 @router.post("/unrolled-attempt", response_model=UnrolledRoastAttemptResponse)

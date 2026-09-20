@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from ..models import DailyRoll, GroupProtection, RoastReservation, RoastReservationParticipant
@@ -56,9 +56,21 @@ def reservation_to_schema(session: Session, reservation: RoastReservation) -> Ro
     )
 
 
-def prepare_reservation(session: Session, req: RoastReservationPrepareRequest) -> RoastReservationPrepareResponse:
+def prepare_reservation(
+    session: Session,
+    req: RoastReservationPrepareRequest,
+    *,
+    expected_reservation_id: str | None = None,
+) -> RoastReservationPrepareResponse:
     """在单一事务内检查目标、加入现有预约或消费资源创建预约。"""
 
+    if session.get_bind().dialect.name == "sqlite":
+        # SQLite 忽略 FOR UPDATE；先取得写锁，再计数，避免两种加入入口并发超员。
+        session.execute(update(RoastReservation).where(
+            RoastReservation.date_str == req.date_str,
+            RoastReservation.group_id == req.group_id,
+            RoastReservation.target_id == req.target_id,
+        ).values(status=RoastReservation.status))
     target_roll = session.execute(
         select(DailyRoll).where(DailyRoll.date_str == req.date_str, DailyRoll.user_id == req.target_id)
     ).scalar_one_or_none()
@@ -75,6 +87,13 @@ def prepare_reservation(session: Session, req: RoastReservationPrepareRequest) -
         )
         .with_for_update()
     ).scalar_one_or_none()
+    # 回复只允许加入绑定的 pending 预约，不能落入创建或即时烧烤路径。
+    if expected_reservation_id is not None and (
+        reservation is None
+        or reservation.reservation_id != expected_reservation_id
+        or target_roll is not None
+    ):
+        return RoastReservationPrepareResponse(status="reservation_closed")
     if reservation:
         participant = session.execute(
             select(RoastReservationParticipant).where(

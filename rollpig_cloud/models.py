@@ -235,6 +235,23 @@ class RoastReservation(Base):
     completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
 
 
+class RoastReservationMessage(Base):
+    """按 Bot、群和消息 ID 定位预约，不依赖通知文案。"""
+
+    __tablename__ = "roast_reservation_messages"
+    __table_args__ = (
+        UniqueConstraint("bot_id", "group_id", "message_id", name="uq_reservation_message_scope"),
+        Index("ix_reservation_messages_date", "date_str"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    bot_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    group_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    message_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    reservation_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    date_str: Mapped[dt.date] = mapped_column(Date, nullable=False)
+
+
 class RoastReservationParticipant(Base):
     __tablename__ = "roast_reservation_participants"
     __table_args__ = (
