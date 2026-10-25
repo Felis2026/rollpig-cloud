@@ -321,6 +321,21 @@ https://pig.felislab.cc/resources/rollpig-roasts/manifest.json
 - 小猪资源包：[Felis2026/rollpig-resources](https://github.com/Felis2026/rollpig-resources)
 - PigHub：[pighub.top](https://pighub.top/)
 
+## 回归测试
+
+运行默认测试：
+
+```bash
+poetry run python -m unittest discover -s tests
+```
+
+真实 MySQL 并发测试通过 `ROLLPIG_TEST_MYSQL_URL` 启用，使用 `REPEATABLE READ` 验证回复加入、火力升级、人数上限、接管和抽猪到场。未设置时跳过这些测试。测试会创建表并写入独立群号的数据，应连接专用测试库。
+
+```bash
+ROLLPIG_TEST_MYSQL_URL='mysql+pymysql://user:password@127.0.0.1:3306/rollpig_test' \
+  poetry run python -m unittest discover -s tests
+```
+
 ## 📄 许可证
 
 本项目使用 MIT License，详见 [LICENSE](./LICENSE)。

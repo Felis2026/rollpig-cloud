@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
-from sqlalchemy import func, select, update
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from ..models import DailyRoll, GroupProtection, RoastReservation, RoastReservationParticipant
@@ -21,14 +21,34 @@ from .roast_refills import mark_group_active_users
 ROAST_RESERVATION_MAX_PARTICIPANTS = 12
 
 
-def reservation_to_schema(session: Session, reservation: RoastReservation) -> RoastReservationItem:
-    """构造完整预约快照；参与者按加入顺序稳定返回。"""
+def _locked_participants(session: Session, reservation_id: str) -> list[RoastReservationParticipant]:
+    """在调用方持有场次锁时读取当前名单，并刷新会话中的贡献值。"""
 
-    rows = session.execute(
+    # 通知预读可能已建立旧事务快照；FOR UPDATE 使用当前数据，不能退回普通 SELECT。
+    return session.scalars(
         select(RoastReservationParticipant)
-        .where(RoastReservationParticipant.reservation_id == reservation.reservation_id)
+        .where(RoastReservationParticipant.reservation_id == reservation_id)
         .order_by(RoastReservationParticipant.id)
-    ).scalars().all()
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).all()
+
+
+def reservation_to_schema(
+    session: Session,
+    reservation: RoastReservation,
+    *,
+    participants: list[RoastReservationParticipant] | None = None,
+) -> RoastReservationItem:
+    """构造预约快照，可复用调用方已锁定的当前参与者名单。"""
+
+    rows = participants
+    if rows is None:
+        rows = session.execute(
+            select(RoastReservationParticipant)
+            .where(RoastReservationParticipant.reservation_id == reservation.reservation_id)
+            .order_by(RoastReservationParticipant.id)
+        ).scalars().all()
     return RoastReservationItem(
         reservation_id=reservation.reservation_id,
         date_str=reservation.date_str,
@@ -125,24 +145,22 @@ def prepare_reservation(
     ):
         return RoastReservationPrepareResponse(status="reservation_closed")
     if reservation:
+        members = _locked_participants(session, reservation.reservation_id)
         if reservation.status != "pending":
             return RoastReservationPrepareResponse(
-                status="reservation_busy", reservation=reservation_to_schema(session, reservation),
+                status="reservation_busy", reservation=reservation_to_schema(session, reservation, participants=members),
             )
         if reservation.force_mode == "super":
             return RoastReservationPrepareResponse(
                 status="already_joined" if (reservation.force_operator_id or reservation.owner_id) == req.attacker_id else "reservation_closed",
-                reservation=reservation_to_schema(session, reservation),
+                reservation=reservation_to_schema(session, reservation, participants=members),
             )
         if req.force_mode == "super":
             if not req.supports_protection_gathering or req.protection_gathering_version < 2:
                 return RoastReservationPrepareResponse(
-                    status="reservation_closed", reservation=reservation_to_schema(session, reservation),
+                    status="reservation_closed", reservation=reservation_to_schema(session, reservation, participants=members),
                 )
             # 权限接管不增加报名人数，先保存原队员的加餐资格再改变判定模式。
-            members = session.scalars(select(RoastReservationParticipant).where(
-                RoastReservationParticipant.reservation_id == reservation.reservation_id
-            )).all()
             reservation.force_feed_user_ids = [
                 item.user_id for item in members if item.user_id != req.attacker_id
                 and (reservation.force_mode is None or reservation.protection_required)
@@ -155,31 +173,22 @@ def prepare_reservation(
             reservation.delivery_bot_id = req.delivery_bot_id
             mark_group_active_users(session, date_str=req.date_str, group_id=req.group_id, user_ids=[req.attacker_id])
             session.flush()
-            if target_roll is not None:
-                _activate_reservation(session, reservation, target_roll.pig_id)
-            return RoastReservationPrepareResponse(status="reservation_joined", reservation=reservation_to_schema(session, reservation))
-        participant = session.execute(
-            select(RoastReservationParticipant).where(
-                RoastReservationParticipant.reservation_id == reservation.reservation_id,
-                RoastReservationParticipant.user_id == req.attacker_id,
-            )
-        ).scalar_one_or_none()
+            arrived_pig_id = reservation.target_pig_id or (target_roll.pig_id if target_roll else "")
+            if arrived_pig_id:
+                _activate_reservation(session, reservation, arrived_pig_id)
+            return RoastReservationPrepareResponse(status="reservation_joined", reservation=reservation_to_schema(session, reservation, participants=members))
+        participant = next((item for item in members if item.user_id == req.attacker_id), None)
         boosted = bool(reservation.protection_required and req.force_mode == "normal")
         upgrading = participant is not None and boosted
         if participant and not (boosted and participant.contribution < 2) and req.force_mode != "super":
             return RoastReservationPrepareResponse(
                 status="already_joined",
-                reservation=reservation_to_schema(session, reservation),
+                reservation=reservation_to_schema(session, reservation, participants=members),
             )
-        participant_count = session.scalar(
-            select(func.count()).select_from(RoastReservationParticipant).where(
-                RoastReservationParticipant.reservation_id == reservation.reservation_id
-            )
-        ) or 0
-        if participant is None and participant_count >= ROAST_RESERVATION_MAX_PARTICIPANTS:
+        if participant is None and len(members) >= ROAST_RESERVATION_MAX_PARTICIPANTS:
             return RoastReservationPrepareResponse(
                 status="reservation_full",
-                reservation=reservation_to_schema(session, reservation),
+                reservation=reservation_to_schema(session, reservation, participants=members),
             )
         if boosted and not consume_force_usage(session, user_id=req.attacker_id, date_str=req.date_str):
             return RoastReservationPrepareResponse(status="force_denied")
@@ -192,6 +201,7 @@ def prepare_reservation(
                 contribution=2 if boosted else 1,
             )
             session.add(participant)
+            members.append(participant)
         elif boosted:
             participant.contribution = 2
         if req.force_mode == "super" and reservation.protection_required:
@@ -203,11 +213,13 @@ def prepare_reservation(
             user_ids=[req.attacker_id],
         )
         session.flush()
-        if target_roll is not None:
-            _activate_reservation(session, reservation, target_roll.pig_id)
+        # 抽猪事务可能在通知快照建立后到场，锁定场次中保存的形态优先于旧抽取视图。
+        arrived_pig_id = reservation.target_pig_id or (target_roll.pig_id if target_roll else "")
+        if arrived_pig_id:
+            _activate_reservation(session, reservation, arrived_pig_id)
         return RoastReservationPrepareResponse(
             status="reservation_upgraded" if upgrading else "reservation_joined",
-            reservation=reservation_to_schema(session, reservation),
+            reservation=reservation_to_schema(session, reservation, participants=members),
         )
 
     is_protected = protection is not None
@@ -281,9 +293,7 @@ def _activate_reservation(session: Session, reservation: RoastReservation, targe
     """目标已到场时检查集结条件，达标后冻结名单并进入待领取状态。"""
 
     reservation.target_pig_id = target_pig_id
-    participants = session.scalars(select(RoastReservationParticipant).where(
-        RoastReservationParticipant.reservation_id == reservation.reservation_id
-    )).all()
+    participants = _locked_participants(session, reservation.reservation_id)
     if reservation.protection_required and reservation.force_mode != "super":
         if sum(item.contribution for item in participants) < reservation.protection_required:
             return False
