@@ -113,6 +113,8 @@ def prepare_reservation(
             (RoastReservation.status == "pending") | (RoastReservation.protection_required > 0) | (req.force_mode == "super"),
         )
         .with_for_update()
+        # 回复入口可能已预读 pending 对象，取得行锁后须覆盖会话中的旧状态。
+        .execution_options(populate_existing=True)
     ).scalar_one_or_none()
     # 回复只允许加入绑定的 pending 预约，不能落入创建或即时烧烤路径。
     if expected_reservation_id is not None and (
@@ -133,6 +135,10 @@ def prepare_reservation(
                 reservation=reservation_to_schema(session, reservation),
             )
         if req.force_mode == "super":
+            if not req.supports_protection_gathering or req.protection_gathering_version < 2:
+                return RoastReservationPrepareResponse(
+                    status="reservation_closed", reservation=reservation_to_schema(session, reservation),
+                )
             # 权限接管不增加报名人数，先保存原队员的加餐资格再改变判定模式。
             members = session.scalars(select(RoastReservationParticipant).where(
                 RoastReservationParticipant.reservation_id == reservation.reservation_id
@@ -145,6 +151,8 @@ def prepare_reservation(
             reservation.force_operator_id = req.attacker_id
             reservation.force_operator_name = req.attacker_name
             reservation.force_mode = "super"
+            # 接管后的场次只允许新客户端领取，由声明能力的请求 Bot 负责投递。
+            reservation.delivery_bot_id = req.delivery_bot_id
             mark_group_active_users(session, date_str=req.date_str, group_id=req.group_id, user_ids=[req.attacker_id])
             session.flush()
             if target_roll is not None:

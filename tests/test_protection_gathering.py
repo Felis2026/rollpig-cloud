@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("ROLLPIG_CLOUD_DATABASE_URL", "sqlite+pysqlite:///:memory:")
 
-from sqlalchemy import create_engine, event, inspect, select, text
+from sqlalchemy import create_engine, event, inspect, select, text, update
 from sqlalchemy.orm import Session
 from sqlalchemy.schema import CreateTable
 
@@ -247,6 +247,90 @@ class CloudProtectionGatheringTests(unittest.TestCase):
                 result = join_by_message(RoastReservationReplyJoinRequest(bot_id="bot", group_id="100", message_id="42",
                                            date_str=DATE, attacker_id=user, attacker_name=user, protection_gathering_version=2), self.session)
         self.assertEqual(result.reservation.status, "ready")
+
+    def test_reply_rechecks_cached_pending_status_under_mutation_lock(self):
+        """回复预读后其他请求已冻结并领取，加入事务必须重新读取场次状态。"""
+        from rollpig_cloud.routers import roast_reservations as router
+        from rollpig_cloud.schemas import RoastReservationBindMessageRequest, RoastReservationReplyJoinRequest
+        from rollpig_cloud.services.reservations import prepare_reservation
+
+        self.arrive()
+        for user in "abc":
+            created = prepare(self.request(user), self.session)
+        reservation_id = created.reservation.reservation_id
+        router.bind_message(RoastReservationBindMessageRequest(
+            reservation_id=reservation_id, bot_id="bot", group_id="100", message_id="42", date_str=DATE,
+        ), self.session)
+        self.session.add(DailyRoll(date_str=DATE, user_id="late", pig_id="pig"))
+        self.session.commit()
+
+        def freeze_before_mutation(session, request, **kwargs):
+            """在回复预读之后模拟另一请求提交第四人并领取场次。"""
+            session.connection().execute(RoastReservationParticipant.__table__.insert().values(
+                reservation_id=reservation_id, user_id="d", pig_id="pig", contribution=1,
+            ))
+            session.connection().execute(update(RoastReservation).where(
+                RoastReservation.reservation_id == reservation_id,
+            ).values(status="processing", claim_token="other-claim"))
+            return prepare_reservation(session, request, **kwargs)
+
+        def preserve_mysql_identity_map(execution):
+            # SQLite 写锁辅助 UPDATE 会刷新对象；关闭该同步以复现 MySQL 的旧对象读取。
+            if execution.is_update:
+                execution.update_execution_options(synchronize_session=False)
+
+        event.listen(self.session, "do_orm_execute", preserve_mysql_identity_map)
+        try:
+            with (patch.object(router, "rollpig_today", return_value=DATE),
+                  patch.object(router, "prepare_reservation", side_effect=freeze_before_mutation)):
+                response = router.join_by_message(RoastReservationReplyJoinRequest(
+                    bot_id="bot", group_id="100", message_id="42", date_str=DATE,
+                    attacker_id="late", protection_gathering_version=2,
+                ), self.session)
+        finally:
+            event.remove(self.session, "do_orm_execute", preserve_mysql_identity_map)
+        self.assertEqual(response.status, "reservation_closed")
+        self.session.expire_all()
+        row = self.session.scalar(select(RoastReservation))
+        self.assertEqual((row.status, row.claim_token), ("processing", "other-claim"))
+        members = self.session.scalars(select(RoastReservationParticipant.user_id)).all()
+        self.assertEqual(set(members), set("abcd"))
+
+    def test_legacy_takeover_keeps_ordinary_reservation_deliverable(self):
+        """未声明接管能力的请求不得改变普通预约，旧 Owner 仍能领取。"""
+        self.session.delete(self.session.scalar(select(GroupProtection)))
+        self.session.commit()
+        created = prepare(self.request(delivery_bot_id="old-bot", supports_protection_gathering=False,
+                                       protection_gathering_version=0), self.session)
+        result = prepare(self.request("admin", delivery_bot_id="old-bot", force_mode="super",
+                                      supports_protection_gathering=False, protection_gathering_version=0), self.session)
+        self.assertEqual(result.status, "reservation_closed")
+        self.assertEqual(result.reservation.reservation_id, created.reservation.reservation_id)
+        self.assertEqual(result.reservation.force_operator_id, "")
+        self.assertIsNone(result.reservation.force_mode)
+        self.arrive()
+        claimed = claim(RoastReservationClaimRequest(delivery_bot_id="old-bot", date_str=DATE), self.session)
+        self.assertEqual(len(claimed.items), 1)
+
+    def test_capable_takeover_moves_delivery_to_requesting_bot(self):
+        """新 Bot 接管旧 Owner 的场次后，投递归新 Bot，原队伍和加餐资格保留。"""
+        self.session.delete(self.session.scalar(select(GroupProtection)))
+        self.session.commit()
+        prepare(self.request(delivery_bot_id="old-bot", supports_protection_gathering=False,
+                             protection_gathering_version=0), self.session)
+        prepare(self.request("b", delivery_bot_id="old-bot"), self.session)
+        result = prepare(self.request("admin", delivery_bot_id="new-bot", force_mode="super"), self.session)
+        self.assertEqual(result.reservation.delivery_bot_id, "new-bot")
+        self.assertEqual(result.reservation.owner_id, "a")
+        self.assertEqual(result.reservation.force_operator_id, "admin")
+        self.assertEqual(result.reservation.force_feed_user_ids, ["a", "b"])
+        self.assertEqual([item.user_id for item in result.reservation.participants], ["a", "b"])
+        self.arrive()
+        old = claim(RoastReservationClaimRequest(delivery_bot_id="old-bot", date_str=DATE), self.session)
+        self.assertFalse(old.items)
+        new = claim(RoastReservationClaimRequest(delivery_bot_id="new-bot", date_str=DATE,
+                    supports_prepared=True, supports_protection_gathering=True, protection_gathering_version=2), self.session)
+        self.assertEqual(len(new.items), 1)
 
     def test_multiple_victim_event_round_trip(self):
         from rollpig_cloud.routers.events import list_events

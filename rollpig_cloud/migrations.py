@@ -245,13 +245,28 @@ def _migrate_protection_gatherings(engine: Engine) -> None:
             for index in RoastReservation.__table__.indexes:
                 index.create(conn)
     elif engine.dialect.name == "mysql":
-        # 先建立新唯一约束，再移除旧约束，迁移过程中仍约束活跃场次。
-        new_name = "uq_roast_reservation_active_target"
-        if new_name not in constraints:
-            with engine.begin() as conn:
-                conn.execute(text(f"ALTER TABLE roast_reservations ADD CONSTRAINT {new_name} UNIQUE (date_str, group_id, target_id, active_slot)"))
         with engine.begin() as conn:
-            conn.execute(text(f"ALTER TABLE roast_reservations DROP INDEX {old_name}"))
+            # MySQL DDL 会隐式提交，命名锁须与结构检查、增删索引使用同一连接。
+            lock_params = {"name": "rollpig.cloud.reservation-index-v2"}
+            acquired = conn.execute(text("SELECT GET_LOCK(:name, 60)"), lock_params).scalar()
+            if acquired != 1:
+                raise RuntimeError("未能取得预约索引迁移锁，请稍后重试启动")
+            try:
+                # 等待期间其他实例可能已完成迁移，取得锁后重新读取约束。
+                locked_constraints = {item["name"] for item in inspect(conn).get_unique_constraints("roast_reservations")}
+                if old_name not in locked_constraints:
+                    return
+                new_name = "uq_roast_reservation_active_target"
+                if new_name not in locked_constraints:
+                    conn.execute(text(f"ALTER TABLE roast_reservations ADD CONSTRAINT {new_name} UNIQUE (date_str, group_id, target_id, active_slot)"))
+                conn.execute(text(f"ALTER TABLE roast_reservations DROP INDEX {old_name}"))
+            finally:
+                try:
+                    conn.execute(text("SELECT RELEASE_LOCK(:name)"), lock_params)
+                except Exception:
+                    # 释放失败的连接不能返回池中继续持有迁移锁。
+                    conn.invalidate()
+                    raise
     else:
         raise RuntimeError("保护合烤迁移仅支持 SQLite 与 MySQL")
 
