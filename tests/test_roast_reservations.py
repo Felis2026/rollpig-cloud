@@ -711,12 +711,16 @@ class CloudRoastReservationTests(unittest.TestCase):
         self.session.commit()
         self.assertEqual(blocked.status, "protected")
 
-        forced = prepare_reservation(self.session, self._request(force_mode="normal"))
+        legacy_forced = prepare_reservation(self.session, self._request(force_mode="normal"))
+        self.assertEqual(legacy_forced.status, "protected")
+        forced = prepare_reservation(self.session, self._request(force_mode="normal", supports_protection_gathering=True, protection_gathering_version=2))
         self.session.commit()
         self.assertEqual(forced.status, "reservation_created")
-        self.assertTrue(forced.protection_broken)
+        self.assertFalse(forced.protection_broken)
+        self.assertEqual(forced.reservation.protection_required, 2)
+        self.assertEqual(forced.reservation.participants[0].contribution, 2)
 
-        joined = prepare_reservation(self.session, self._request("b"))
+        joined = prepare_reservation(self.session, self._request("b", supports_protection_gathering=True, protection_gathering_version=2))
         self.session.commit()
         self.assertEqual(joined.status, "reservation_joined")
 

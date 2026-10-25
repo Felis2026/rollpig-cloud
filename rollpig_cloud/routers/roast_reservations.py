@@ -4,14 +4,14 @@ import datetime as dt
 import uuid
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..auth import verify_token
 from ..config import rollpig_today
 from ..db import get_session, run_transaction_with_sqlite_lock_retry
-from ..models import DailyRoll, GroupRoll, RoastReservation, RoastReservationMessage, UnrolledRoastAttempt
+from ..models import DailyRoll, GroupProtection, GroupRoll, RoastReservation, RoastReservationMessage, UnrolledRoastAttempt
 from ..schemas import (
     RoastReservationClaimRequest,
     RoastReservationClaimResponse,
@@ -41,6 +41,13 @@ ROAST_RESERVATION_CLAIM_TIMEOUT = dt.timedelta(minutes=5)
 
 
 # ================================ 回复消息加入预约 ================================ #
+
+
+@router.get("/capabilities")
+def capabilities():
+    """声明保护合烤能力，供新客户端在消费加急额度前核对服务端版本。"""
+
+    return {"protection_gathering": True, "protection_gathering_version": 2}
 
 
 @router.post("/bind-message")
@@ -98,7 +105,7 @@ def join_by_message(req: RoastReservationReplyJoinRequest, session: Session = De
             RoastReservation.reservation_id == binding.reservation_id,
             RoastReservation.group_id == req.group_id,
             RoastReservation.date_str == req.date_str,
-        ).with_for_update())
+        ))
         if reservation is None or reservation.status != "pending":
             return RoastReservationPrepareResponse(status="reservation_closed")
         if reservation.target_id == req.attacker_id:
@@ -114,6 +121,8 @@ def join_by_message(req: RoastReservationReplyJoinRequest, session: Session = De
             attacker_pig_id=roll.pig_id, target_id=reservation.target_id,
             target_name=reservation.target_name, group_id=req.group_id,
             delivery_bot_id=req.bot_id, date_str=req.date_str,
+            supports_protection_gathering=True,
+            protection_gathering_version=req.protection_gathering_version,
         ), expected_reservation_id=reservation.reservation_id)
         if response.status in {"reservation_joined", "already_joined"}:
             # 与加入同事务登记群内出现记录；重复通知不改写首次出现时间和形态。
@@ -168,15 +177,21 @@ def prepare(req: RoastReservationPrepareRequest, session: Session = Depends(get_
         try:
             response = prepare_reservation(session, req)
             session.commit()
-            if response.status in {"reservation_created", "reservation_joined", "already_joined"}:
+            if response.status in {"reservation_created", "reservation_joined", "reservation_upgraded", "already_joined"}:
                 # 新事务读取最新 DailyRoll，和 daily-roll 创建事务内的激活形成双保险。
                 # 两边都幂等，因此无论谁先提交都不会留下永久 pending。
-                if activate_if_target_already_rolled(
+                activate_if_target_already_rolled(
                     session,
                     date_str=req.date_str,
                     target_id=req.target_id,
-                ):
-                    session.commit()
+                )
+                # 未达标的保护场次也会保存已抽猪状态，通知须读取本次对账后的快照。
+                session.commit()
+                if response.reservation is not None:
+                    current = session.scalar(select(RoastReservation).where(
+                        RoastReservation.reservation_id == response.reservation.reservation_id
+                    ).execution_options(populate_existing=True))
+                    response.reservation = reservation_to_schema(session, current)
             return response
         except IntegrityError:
             session.rollback()
@@ -231,6 +246,10 @@ def claim(req: RoastReservationClaimRequest, session: Session = Depends(get_sess
     )
     if excluded_ids:
         claim_query = claim_query.where(~RoastReservation.reservation_id.in_(excluded_ids))
+    if not req.supports_protection_gathering or req.protection_gathering_version < 2:
+        # 旧客户端会把加急场次视为必中，也无法处理贡献权重，留给新客户端领取。
+        claim_query = claim_query.where(RoastReservation.protection_required == 0,
+                                        RoastReservation.force_operator_id == "")
     rows = session.execute(claim_query).scalars().all()
     for row in rows:
         if row.outcome_snapshot is not None:
@@ -264,8 +283,22 @@ def _prepare_outcome_once(
 ) -> RoastReservationMutationResponse:
     """幂等固化结果；相同 token 只能绑定同一份 outcome snapshot。"""
 
+    if session.get_bind().dialect.name == "sqlite":
+        # SQLite 不支持行锁，先取写锁再读取快照，防止并发结果覆盖和重复升级。
+        session.execute(update(RoastReservation).where(
+            RoastReservation.reservation_id == req.reservation_id
+        ).values(status=RoastReservation.status))
+    # 与创建/加入保持保护行在前、预约行在后的加锁顺序，避免交叉等待。
+    scope = session.scalar(select(RoastReservation).where(RoastReservation.reservation_id == req.reservation_id))
+    protection = None
+    if scope is not None and scope.protection_required:
+        protection = session.scalar(select(GroupProtection).where(
+            GroupProtection.protect_date == scope.date_str,
+            GroupProtection.group_id == scope.group_id,
+            GroupProtection.user_id == scope.target_id,
+        ).with_for_update().execution_options(populate_existing=True))
     row = session.execute(
-        select(RoastReservation).where(RoastReservation.reservation_id == req.reservation_id).with_for_update()
+        select(RoastReservation).where(RoastReservation.reservation_id == req.reservation_id).with_for_update().execution_options(populate_existing=True)
     ).scalar_one_or_none()
     if (
         row is None
@@ -277,15 +310,23 @@ def _prepare_outcome_once(
         if row.status != "processing":
             return RoastReservationMutationResponse(ok=False)
         row.outcome_snapshot = req.outcome_snapshot
+        if protection is not None and str(req.outcome_snapshot.get("event_type") or "") == "success":
+            # 与首次结果快照同事务升级；重试只读取已固化快照。
+            protection.roast_success_count = min(4, protection.roast_success_count + 1)
         # ================================ 预约加餐结算 ================================ #
         # 只有新客户端明确声明、普通预约且结果成功时结算。结果与预约快照在同一
         # 事务中固化，重领时只读取已保存结果，不会重复成长或改变群内提示。
         if (
             req.settle_daily_feed
-            and row.force_mode not in {"normal", "super"}
+            and (row.force_feed_user_ids or row.force_mode not in {"normal", "super"}
+                 or (row.protection_required and row.force_mode != "super"))
             and str(req.outcome_snapshot.get("event_type") or "") == "success"
         ):
             reservation_item = reservation_to_schema(session, row)
+            # 合烤按个人贡献判断，加急参与者不领取，也不阻断普通参与者的成长。
+            eligible = [participant for participant in reservation_item.participants
+                        if (row.force_mode == "super" and participant.user_id in (row.force_feed_user_ids or []))
+                        or (row.force_mode != "super" and (not row.protection_required or participant.contribution == 1))]
             # 多场预约可能共享参与者；统一按 user_id 获取用户行锁，避免两场事务
             # 以相反参与顺序结算时形成死锁。最终结果仍按原参与顺序固化和展示。
             feed_results_by_user = {
@@ -297,13 +338,13 @@ def _prepare_outcome_once(
                     source_id=row.reservation_id,
                 )
                 for participant in sorted(
-                    reservation_item.participants,
+                    eligible,
                     key=lambda item: item.user_id,
                 )
             }
             row.daily_feed_results = [
                 feed_results_by_user[participant.user_id].model_dump(mode="json")
-                for participant in reservation_item.participants
+                for participant in eligible
             ]
         else:
             row.daily_feed_results = []
@@ -382,6 +423,7 @@ def complete(req: RoastReservationCompleteRequest, session: Session = Depends(ge
         return RoastReservationMutationResponse(ok=False)
     if row.status != "completed":
         row.status = "completed"
+        row.active_slot = None
         row.completed_at = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
     reservation_item = reservation_to_schema(session, row)
     event_recorded = False

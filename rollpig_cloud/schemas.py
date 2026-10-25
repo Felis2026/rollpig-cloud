@@ -286,9 +286,15 @@ class EventCreateRequest(BaseModel):
     participant_count: int = 0
     backfire_victim_id: str = ""
     backfire_victim_name: str = ""
+    backfire_victim_ids: list[str] = Field(default_factory=list)
+    backfire_victim_names: list[str] = Field(default_factory=list)
     special_reason: str = ""
     settle_daily_feed: bool = False
     source_id: str = Field(default="", max_length=64)
+    force_mode: str = ""
+    protection_level: int = Field(default=0, ge=0, le=5)
+    reservation_owner_id: str = ""
+    reservation_owner_name: str = ""
 
 
 class EventCreateResponse(BaseModel):
@@ -312,7 +318,13 @@ class EventItem(BaseModel):
     participant_count: int = 0
     backfire_victim_id: str = ""
     backfire_victim_name: str = ""
+    backfire_victim_ids: list[str] = Field(default_factory=list)
+    backfire_victim_names: list[str] = Field(default_factory=list)
     special_reason: str = ""
+    force_mode: str = ""
+    protection_level: int = 0
+    reservation_owner_id: str = ""
+    reservation_owner_name: str = ""
 
 
 class EventListResponse(BaseModel):
@@ -323,10 +335,14 @@ class ReplaceGroupProtectionsRequest(BaseModel):
     group_id: str
     user_ids: list[str] = Field(default_factory=list)
     protect_date: dt.date
+    initial_level: int = Field(default=1, ge=1, le=5)
 
 
 class ProtectedResponse(BaseModel):
     protected: bool
+    base_level: int = 0
+    level: int = 0
+    consecutive_days: int = 0
 
 
 class CollectionResponse(BaseModel):
@@ -368,6 +384,7 @@ class RoastReservationParticipantItem(BaseModel):
     user_id: str
     display_name: str = ""
     pig_id: str = ""
+    contribution: int = 1
 
 
 class RoastReservationItem(BaseModel):
@@ -387,6 +404,10 @@ class RoastReservationItem(BaseModel):
     outcome_snapshot: dict | None = None
     daily_feed_results: list[DailyFeedResult] = Field(default_factory=list)
     claim_token: str = ""
+    protection_required: int = 0
+    force_operator_id: str = ""
+    force_operator_name: str = ""
+    force_feed_user_ids: list[str] = Field(default_factory=list)
 
 
 class RoastReservationPrepareRequest(BaseModel):
@@ -402,6 +423,8 @@ class RoastReservationPrepareRequest(BaseModel):
     now_ts: float | None = None
     cooldown_seconds: int | None = None
     max_charges: int | None = None
+    supports_protection_gathering: bool = False
+    protection_gathering_version: int = 0
 
 
 class RoastReservationPrepareResponse(BaseModel):
@@ -426,6 +449,7 @@ class RoastReservationBindMessageRequest(RoastReservationMessageRequest):
 class RoastReservationReplyJoinRequest(RoastReservationMessageRequest):
     attacker_id: str = Field(min_length=1, max_length=64)
     attacker_name: str = Field(default="", max_length=128)
+    protection_gathering_version: int = 0
 
 
 class RoastReservationOwnedResponse(BaseModel):
@@ -438,6 +462,8 @@ class RoastReservationClaimRequest(BaseModel):
     limit: int = 12
     # 旧 Plus 未声明该能力；Cloud 会把固定快照作为它认识的 sending 返回。
     supports_prepared: bool = False
+    supports_protection_gathering: bool = False
+    protection_gathering_version: int = 0
     excluded_reservation_ids: list[str] = Field(default_factory=list)
 
 

@@ -202,6 +202,60 @@ def _backfill_group_activity(
         )
 
 
+def _migrate_protection_gatherings(engine: Engine) -> None:
+    """保留预约历史并把每日唯一约束改为进行中场次唯一约束。"""
+
+    from sqlalchemy import MetaData
+    from sqlalchemy.schema import CreateTable
+    from .models import RoastReservation
+
+    tables = set(inspect(engine).get_table_names())
+    if "group_protections" in tables:
+        _add_column_if_missing(engine, "group_protections", "roast_success_count", "INTEGER NOT NULL DEFAULT 0")
+        _add_column_if_missing(engine, "group_protections", "base_level", "INTEGER NOT NULL DEFAULT 1")
+        _add_column_if_missing(engine, "group_protections", "consecutive_days", "INTEGER NOT NULL DEFAULT 1")
+    if "roast_reservation_participants" in tables:
+        _add_column_if_missing(engine, "roast_reservation_participants", "contribution", "INTEGER NOT NULL DEFAULT 1")
+    _add_column_if_missing(engine, "roast_reservations", "protection_required", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(engine, "roast_reservations", "force_operator_id", "VARCHAR(64) NOT NULL DEFAULT ''")
+    _add_column_if_missing(engine, "roast_reservations", "force_operator_name", "VARCHAR(128) NOT NULL DEFAULT ''")
+    _add_column_if_missing(engine, "roast_reservations", "force_feed_user_ids", "JSON NULL")
+    _add_column_if_missing(engine, "roast_reservations", "active_slot", "INTEGER NULL DEFAULT 1")
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE roast_reservations SET active_slot = NULL WHERE status = 'completed'"))
+    old_name = "uq_roast_reservation_date_group_target"
+    constraints = {item["name"] for item in inspect(engine).get_unique_constraints("roast_reservations")}
+    if old_name not in constraints:
+        return
+    if engine.dialect.name == "sqlite":
+        # SQLite 无法直接删除表级 UNIQUE，事务内复制全部列后换表。
+        # 参与者和通知通过 reservation_id 关联，原有 ID 与结果快照原样保留。
+        table = RoastReservation.__table__.to_metadata(MetaData(), name="roast_reservations_migrating")
+        columns = ", ".join(_quote_identifier(column.name) for column in table.columns)
+        with engine.begin() as conn:
+            # sqlite3 默认延迟 BEGIN，显式取得事务锁后 DDL 才能随复制失败一起回滚。
+            conn.exec_driver_sql("BEGIN IMMEDIATE")
+            locked_constraints = {item["name"] for item in inspect(conn).get_unique_constraints("roast_reservations")}
+            if old_name not in locked_constraints:
+                return
+            conn.execute(CreateTable(table))
+            conn.execute(text(f"INSERT INTO roast_reservations_migrating ({columns}) SELECT {columns} FROM roast_reservations"))
+            conn.execute(text("DROP TABLE roast_reservations"))
+            conn.execute(text("ALTER TABLE roast_reservations_migrating RENAME TO roast_reservations"))
+            for index in RoastReservation.__table__.indexes:
+                index.create(conn)
+    elif engine.dialect.name == "mysql":
+        # 先建立新唯一约束，再移除旧约束，迁移过程中仍约束活跃场次。
+        new_name = "uq_roast_reservation_active_target"
+        if new_name not in constraints:
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE roast_reservations ADD CONSTRAINT {new_name} UNIQUE (date_str, group_id, target_id, active_slot)"))
+        with engine.begin() as conn:
+            conn.execute(text(f"ALTER TABLE roast_reservations DROP INDEX {old_name}"))
+    else:
+        raise RuntimeError("保护合烤迁移仅支持 SQLite 与 MySQL")
+
+
 def ensure_runtime_migrations(
     engine: Engine,
     *,
@@ -258,6 +312,7 @@ def ensure_runtime_migrations(
             "daily_feed_results",
             "JSON NULL",
         )
+        _migrate_protection_gatherings(engine)
 
     if "daily_report_deliveries" in table_names:
         # 领取次数与下次可领取时间是安全重试的持久化依据；已有记录从零次开始，
