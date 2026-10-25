@@ -14,23 +14,22 @@
 </div>
 
 <p align="center">
-  <a href="https://github.com/Bearlele/nonebot-plugin-rollpig">上游原作</a> ·
-  <a href="https://github.com/Felis2026/nonebot-plugin-rollpig-plus">Plus</a> ·
-  <a href="https://github.com/Felis2026/rollpig-cloud">Cloud</a> ·
+  <a href="https://github.com/Bearlele/nonebot-plugin-rollpig">上游原作</a> |
+  <a href="https://github.com/Felis2026/nonebot-plugin-rollpig-plus">Plus</a> |
+  <a href="https://github.com/Felis2026/rollpig-cloud">Cloud</a> |
   <a href="https://github.com/Felis2026/rollpig-resources">Resources</a>
 </p>
 
-> **什么时候需要部署？** 单 Bot 使用本地存储时不需要 RollPig Cloud。只有多个 Bot 需要共享抽猪记录、图鉴成长、烤群友充能、预约烤猪、烤箱续火或群日报状态时，才需要启用云端存储。
+> **什么时候需要部署？** 单 Bot 使用本地存储时不需要 RollPig Cloud。只有多个 Bot 需要共享抽猪记录、图鉴成长、烤群友充能、预约与聚众烤猪、烤箱续火或群日报状态时，才需要启用云端存储。
 
 ## ✨ 功能概述
 
 - **多 Bot 状态同步**：保存 `daily_rolls`、`draw_state`、`collections` 等用户成长数据。
-- **群维度数据**：保存 `group_rolls`、群保护状态、活跃群列表与日报所需聚合数据。
+- **群维度数据**：保存 `group_rolls`、群保护状态与等级、活跃群列表及日报聚合数据。
 - **烤群友充能**：为普通烤群友提供服务端次数存储与冷却恢复。
-- **预约烤猪**：处理预约创建、多人加入、首次抽猪激活、跨 Bot 领取与固定结果重试。
-- **烤箱续火**：保存群日活与投票申请，并在单个事务中完成有效成员过滤、群管理双票验票和普通烧烤配额恢复；兼容旧指令“烤箱补货”。
-- **昨日抽取快照**：冻结每日抽取时的成长结果、资源版本与 EX 外观，供新版“昨日小猪”准确回放。
-- **昨日补签**：Plus 0.14.1 可免费补抽昨天的小猪，收藏与成长在同一事务中结算；补签不登记昨日群活动、不激活预约、不补发互动权益。标记保存在现有 JSON 快照中，无需新增数据库字段。
+- **预约与聚众烤猪**：处理预约创建、多人添柴、保护门槛判定、回复通知加入、跨 Bot 领取与固定结果幂等投递。
+- **烤箱续火**：保存群日活与投票申请，并在单事务中完成有效成员过滤、群管理双票验票与普通烧烤配额恢复（兼容旧指令“烤箱补货”）。
+- **昨日抽取快照与补签**：冻结每日抽取时的成长结果、资源版本与 EX 外观供“昨日小猪”回放，并支持昨日免费补签的幂等结算。
 - **猪圈日报协同**：按统一截止点聚合群数据，并通过群日唯一领取状态避免多个 Bot 重复投递。
 - **图鉴快照接口**：为 RollPig Plus 图片版图鉴聚合收藏、近 14 天抽猪与近 7 天被烤数据。
 - **静态资源托管**：通过 `/resources/...` 暴露来自 `rollpig-resources` 的远端资源包。
@@ -42,28 +41,28 @@
 | --- | --- | --- |
 | RollPig Plus | `/v1/...` | 多 Bot 用户状态、群数据与充能同步 |
 | 上游原版 / RollPig Plus | `/resources/...` | 公有小猪资源与官方 Overlay 下载 |
-| RollPig Plus 0.10.0+ | `/resources/rollpig-roasts/...` | 共享烤猪文案快照下载 |
+| RollPig Plus `0.10.0+` | `/resources/rollpig-roasts/...` | 共享烤猪文案快照下载 |
 | RollPig Cloud | MySQL | 持久化用户状态、群事件与聚合数据 |
 
 ## 🔗 客户端兼容
 
 | 客户端 | 推荐组合 | 说明 |
 | --- | --- | --- |
-| RollPig Plus `0.14.1+` | Cloud `0.8.0+` | 支持昨日免费补签，重复请求不会重复抽取或增加成长；无需新增数据库字段。 |
-| RollPig Plus `0.14.2+` | Cloud `0.9.0+` | 支持回复预约通知加入；持久化消息关联，并校验预约状态和参与资格。 |
-| RollPig Plus `0.14.0+` | Cloud `0.7.0+` | 普通烤群友成功与普通预约成功可触发每日一次加餐，跨群、跨 Bot 原子结算。 |
-| RollPig Plus `0.13.1+` | Cloud `0.6.1+` | 烤箱补货支持活跃用户发起、群主与管理员双票，并保留至少两名独立支持者。 |
-| 支持“猪圈日报”的 RollPig Plus | Cloud `0.6.2+` | 支持固定截止点资料聚合、跨实例唯一领取、发送状态恢复与带时区的事件时间。 |
-| 支持新版“昨日小猪”的 RollPig Plus | Cloud `0.5.0+` | 完整保存每日抽取成长、资源版本与 EX 外观快照，并支持按用户查询昨日相关事件。 |
-| RollPig Plus `0.11.x` | Cloud `0.4.0+` | 多 Bot 状态同步、预约烤猪与烤箱补货保持兼容；升级 Cloud 不要求旧客户端同步升级。 |
-| RollPig Plus 旧版本 | Cloud `0.5.0+` | 既有请求与响应字段继续保留；客户端不使用的新接口不会影响旧玩法。 |
-| 上游原版 RollPig | 不需要 Cloud | 原版可直接读取静态资源，不使用 Cloud 的 `/v1` 状态接口。 |
+| RollPig Plus `0.15.0+` | Cloud `0.10.0+` | 支持聚众烤猪、保护等级递进、个人火力贡献权重、强行点火接管与多人反噬记录。 |
+| RollPig Plus `0.14.2+` | Cloud `0.9.0+` | 支持直接回复 Bot 预约通知加入，持久化消息关联并校验参与资格。 |
+| RollPig Plus `0.14.1+` | Cloud `0.8.0+` | 支持昨日免费补签，按用户与日期幂等结算收藏与成长。 |
+| RollPig Plus `0.14.0+` | Cloud `0.7.0+` | 普通烤群友成功与普通预约成功可触发每日一次烤猪加餐，跨群、跨 Bot 原子结算。 |
+| 支持“猪圈日报”的 RollPig Plus | Cloud `0.6.2+` | 支持固定截止点资料聚合、跨实例唯一领取与发送状态恢复。 |
+| RollPig Plus `0.13.1+` | Cloud `0.6.1+` | 烤箱续火支持当日活跃用户发起、群主与管理员双票计权。 |
+| 支持新版“昨日小猪”的 RollPig Plus | Cloud `0.5.0+` | 完整保存每日抽取成长、资源版本与 EX 外观快照，并支持按用户查询昨日互动事件。 |
+| RollPig Plus `0.11.x` | Cloud `0.4.0+` | 基础多 Bot 状态同步、预约烤猪与烤箱补货。 |
+| 上游原版 RollPig | 不需要 Cloud | 原版直接拉取静态资源，不使用 Cloud 的 `/v1` 状态接口。 |
 
-Cloud `0.9.0` 可以先于客户端升级，旧版 Plus 的既有玩法保持不变。回复预约通知加入需要 Plus `0.14.2+`；新 Plus 连接旧 Cloud 时仍可通过 `烤群友 @目标` 加入预约。此版本启动时自动新增通知关联表，数据库账号需要建表权限，不修改既有表和数据。昨日补签仍需 Cloud `0.8.0+`，旧 Cloud 缺少补签接口时不会回退本地补签。
+### 升级与运维说明
 
-Plus `0.14.0+` 连接不支持加餐的旧 Cloud 时，原有玩法继续工作，但加餐保持静默且不会回退本地。Cloud `0.6.1` 的补货双票兼容规则与 Cloud `0.6.2` 的日报协同规则继续不变。
-
-Cloud 只保存服务端数据；替换 Cloud 容器或代码不会删除 MySQL 数据，但删除数据库、切换租户 ID 或清理数据库卷都会影响已有成长记录。正式升级前请先备份数据库。
+- **升级顺序**：跨版本升级时建议**先升级 Cloud，再升级 Plus**。新版 Cloud 向后兼容旧版 Plus 的既有请求与字段；新版 Plus 连接旧版 Cloud 时，基础抽猪与普通烧烤照常运行，仅对旧版 Cloud 尚未支持的新功能（如聚众烤猪、回复通知加入、昨日补签等）提示升级或静默跳过，不会回退本地造成数据分叉。
+- **自动结构迁移与权限要求**：Cloud 启动时会自动执行幂等数据库迁移（创建新表、补齐新增列并调整预约表唯一索引），配置的数据库账号需要具备建表与 `ALTER TABLE`（DDL）权限。
+- **数据备份与回滚**：替换 Cloud 容器或代码不会清除 MySQL 数据，但删除数据库、清理数据卷或更改租户 ID 会影响已有成长记录。正式升级前请先备份数据库；`0.10.0` 将预约表由单日唯一约束调整为同目标进行中场次唯一约束，若需回滚至旧版本服务请先恢复数据库备份。
 
 ## ⚙️ 环境变量
 
@@ -88,14 +87,9 @@ Authorization: Bearer <已配置的 Token>
 ROLLPIG_CLOUD_KEYS_JSON={"nekobot-v2":"实际Token1","shenyang-v1":"实际Token2"}
 ```
 
-Key 名称可以修改；Cloud 使用 Token 的不可逆指纹关联统计，更名不会拆分历史数据。旧的
-`ROLLPIG_CLOUD_TOKENS` 继续兼容，未命名 Token 会以 `key-xxxxxxxxxxxxxxxx` 显示。两个变量可以同时使用，
-同一个 Token 出现在两处时优先采用具名配置。
+Key 名称可以修改；Cloud 使用 Token 的不可逆指纹关联统计，更名不会拆分历史数据。旧的 `ROLLPIG_CLOUD_TOKENS` 继续兼容，未命名 Token 会以 `key-xxxxxxxxxxxxxxxx` 显示。两个变量可以同时使用，同一个 Token 出现在两处时优先采用具名配置。
 
-Cloud 会把已鉴权请求按上海业务日期、Key 和路由累计到 `source_key_daily_usage`。其中
-`successful_mutations` 表示成功的 `POST`、`PUT`、`PATCH`、`DELETE` 请求数，不等同于接口一次批量写入的数据库行数；
-每日抽取、外观快照、烤猪事件、群抽取记录和保护名单接口还会分别累计真实的新增、更新、删除与幂等命中数量。
-统计从启用该版本后开始，无法反推历史 Token 来源。日志只包含 Key 指纹和名称，不包含原始 Token、用户 ID 或查询参数。
+Cloud 会把已鉴权请求按上海业务日期、Key 和路由累计到 `source_key_daily_usage`。其中 `successful_mutations` 表示成功的 `POST`、`PUT`、`PATCH`、`DELETE` 请求数，不等同于接口一次批量写入的数据库行数；每日抽取、外观快照、烤猪事件、群抽取记录和保护名单接口还会分别累计真实的新增、更新、删除与幂等命中数量。统计从启用该版本后开始，无法反推历史 Token 来源。日志只包含 Key 指纹和名称，不包含原始 Token、用户 ID 或查询参数。
 
 按 Key 汇总写入结果可以执行：
 
@@ -254,22 +248,23 @@ docker run -d \
 | --- | --- | --- |
 | `POST` | `/v1/cooldowns/consume-roast` | 消耗普通烤群友充能，返回剩余次数与恢复时间 |
 | `POST` | `/v1/cooldowns/consume-force` | 消耗强制类操作次数 |
-| `POST` | `/v1/protections/replace-group` | 替换群保护名单 |
+| `POST` | `/v1/protections/replace-group` | 替换群保护名单与起始等级 |
 | `GET` | `/v1/protections/check` | 检查用户是否在群保护名单中 |
 
-### 预约烤猪
+### 预约与聚众烤猪
 
-回复加入通过 Bot ID、群号和通知消息 ID 定位既有预约，仅允许加入当日仍在等待的预约，不创建新预约、不消耗充能。通知关联保存在新增的 `roast_reservation_messages` 表，启动时自动建表，不修改既有表和记录；数据库账号需要建表权限。关联在后续绑定通知时清理七天前的数据。原有客户端继续使用 `/prepare`，不受新增接口影响。
+新客户端强行点火接管等待队伍时，结果改由发起接管的 Bot 投递，原队员与加餐资格保留；未声明接管能力的旧客户端不能接管已有场次，普通预约仍由原 Bot 投递。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `POST` | `/v1/roast-reservations/unrolled-attempt` | 记录用户当天未抽猪先烤的违规次数 |
 | `POST` | `/v1/roast-reservations/prepare` | 原子检查目标、群保护、预约状态并消费创建资源或免费加入 |
-| `POST` | `/v1/roast-reservations/bind-message` | 幂等绑定 Bot 预约通知，重启后仍可定位 |
+| `GET` | `/v1/roast-reservations/capabilities` | 声明聚众烤猪与预约扩展能力，供客户端消费前核对 |
+| `POST` | `/v1/roast-reservations/bind-message` | 幂等绑定 Bot 预约通知消息 ID，重启后仍可定位 |
 | `POST` | `/v1/roast-reservations/join-by-message` | 根据通知免费加入指定预约，校验参与者今日抽取、人数与预约状态 |
 | `GET` | `/v1/roast-reservations/owned` | 查询指定 Bot 当天是否持有未完成预约 |
 | `POST` | `/v1/roast-reservations/claim` | 原子领取可投递预约，并在同一响应返回当前 Bot 是否仍持有未完成预约 |
-| `POST` | `/v1/roast-reservations/outcome/prepare` | 幂等保存固定结果、结算普通预约参与者加餐并进入可安全重领的 `prepared` |
+| `POST` | `/v1/roast-reservations/outcome/prepare` | 幂等保存固定结果、结算普通参与者加餐并进入可安全重领的 `prepared` |
 | `POST` | `/v1/roast-reservations/sending` | 幂等提交发送意图；进入后不再自动释放或重领 |
 | `POST` | `/v1/roast-reservations/outcome` | 兼容旧 Plus：保存固定结果并直接进入 `sending` |
 | `POST` | `/v1/roast-reservations/complete` | 幂等完成已发送预约 |
@@ -287,8 +282,6 @@ docker run -d \
 | `POST` | `/v1/group-roast-refills/fail` | 将不可继续验票的申请标记失败 |
 | `POST` | `/v1/group-roast-refills/complete` | 按最新日活过滤投票者、为有效群管理追加一票，并原子恢复配额和完成申请 |
 
-新版 Plus 会在 `/prepare` 中声明 `capped-v1` 门槛能力：以发起瞬间的活跃人数为固定分母，四档依次使用 25% / 35% / 45% / 55%，并分别封顶为 8 / 12 / 16 / 20 票。Plus 与 Cloud 同时协商 `group-manager-double-v1` 后，群主和管理员每人计 2 票、普通成员计 1 票，但仍至少需要两名独立支持者。未识别新能力的旧客户端或旧 Cloud 继续按一人一票工作。
-
 ## 🔄 数据迁移
 
 从旧本地 JSON 导入云端：
@@ -304,11 +297,7 @@ poetry run python tools/backfill_p1a_progress.py
 poetry run python tools/migrate_roast_charges.py
 ```
 
-服务启动时也会执行轻量运行期迁移：自动为旧 `user_usage` 表补齐充能列，并通过 SQLAlchemy `create_all` 新建预约、群日活、烤箱补货、日报投递与每日加餐状态表；群日活表首次创建时只回填上海业务日期的今天与昨天，避免后续启动重复扫描全部历史记录。Cloud `0.5.0` 会为旧 `daily_rolls` 表幂等增加抽取结果与外观快照列；Cloud `0.7.0` 继续补齐抽取时 EX 快照、每只猪的加餐成长量及预约加餐结果。历史行保持兼容默认值，不改写真实抽取次数，也不会反向补发过去的加餐。
-
-日报投递按 `date_str + group_id` 保持唯一。发送前失败会按 Cloud 返回的退避时间重新领取；进入 `sending` 后不再自动重领，避免消息结果不确定时重复向群内发送日报。
-
-预约结果由负责群聊的 Owner Bot 领取。只要本机仍持有未完成预约，就会在已有用户请求之外每 60 秒最多发起一次合并领取请求；该请求同时返回可投递项目和是否仍需继续轮询，没有预约时自动停止。领取后的状态依次为 `processing → prepared → sending → completed`：`processing/prepared` 可在租约过期后重领，`sending` 表示“已经提交外部发送意图、结果可能不确定”，永不自动重领。`prepare`、`sending` 与 `complete` 均允许同一领取凭证幂等重试。
+服务启动时也会自动执行轻量幂等迁移：按需创建新增数据表、补齐新增列并更新索引；历史数据保留兼容默认值，不会改写真实抽取次数或反向补发历史权益。日报投递与预约投递均采用租约领取与 `sending` 发送意图保护，避免外部消息结果不确定时发生重复推送。
 
 ## 📦 静态资源包
 
@@ -323,7 +312,7 @@ https://pig.felislab.cc/resources/rollpig-pjsk/manifest.json
 https://pig.felislab.cc/resources/rollpig-roasts/manifest.json
 ```
 
-这样可以避免 cloud 服务代码仓库和资源仓库重复存储图片、manifest 与构建工具。
+这样可以避免 Cloud 服务代码仓库和资源仓库重复存储图片、manifest 与构建工具。
 
 ## 🔗 相关项目
 
@@ -331,6 +320,21 @@ https://pig.felislab.cc/resources/rollpig-roasts/manifest.json
 - RollPig Plus：[Felis2026/nonebot-plugin-rollpig-plus](https://github.com/Felis2026/nonebot-plugin-rollpig-plus)
 - 小猪资源包：[Felis2026/rollpig-resources](https://github.com/Felis2026/rollpig-resources)
 - PigHub：[pighub.top](https://pighub.top/)
+
+## 回归测试
+
+运行默认测试：
+
+```bash
+poetry run python -m unittest discover -s tests
+```
+
+真实 MySQL 并发测试通过 `ROLLPIG_TEST_MYSQL_URL` 启用，使用 `REPEATABLE READ` 验证回复加入、火力升级、人数上限、接管和抽猪到场。未设置时跳过这些测试。测试会创建表并写入独立群号的数据，应连接专用测试库。
+
+```bash
+ROLLPIG_TEST_MYSQL_URL='mysql+pymysql://user:password@127.0.0.1:3306/rollpig_test' \
+  poetry run python -m unittest discover -s tests
+```
 
 ## 📄 许可证
 

@@ -100,6 +100,7 @@ def list_events(
                 str(item) for item in (row.participant_snapshot or {}).get("ids", [])
             }
             or str((row.participant_snapshot or {}).get("backfire_victim_id", "")) == normalized_user_id
+            or normalized_user_id in (row.participant_snapshot or {}).get("backfire_victim_ids", [])
         ]
     return EventListResponse(
         items=[
@@ -119,7 +120,13 @@ def list_events(
                 participant_count=int((row.participant_snapshot or {}).get("count", 0)),
                 backfire_victim_id=(row.participant_snapshot or {}).get("backfire_victim_id", ""),
                 backfire_victim_name=(row.participant_snapshot or {}).get("backfire_victim_name", ""),
+                backfire_victim_ids=(row.participant_snapshot or {}).get("backfire_victim_ids", []),
+                backfire_victim_names=(row.participant_snapshot or {}).get("backfire_victim_names", []),
                 special_reason=(row.participant_snapshot or {}).get("special_reason", ""),
+                force_mode=(row.participant_snapshot or {}).get("force_mode", ""),
+                protection_level=int((row.participant_snapshot or {}).get("protection_level", 0)),
+                reservation_owner_id=(row.participant_snapshot or {}).get("reservation_owner_id", ""),
+                reservation_owner_name=(row.participant_snapshot or {}).get("reservation_owner_name", ""),
             )
             for row in rows
         ]

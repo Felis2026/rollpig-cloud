@@ -20,14 +20,18 @@ def bind_reservation_event(
     return req.model_copy(update={
         "date_str": reservation.date_str,
         "group_id": reservation.group_id,
-        "attacker_id": reservation.owner_id,
-        "attacker_name": reservation.owner_name,
+        "attacker_id": reservation.force_operator_id or reservation.owner_id,
+        "attacker_name": reservation.force_operator_name or reservation.owner_name,
         "target_id": reservation.target_id,
         "target_name": reservation.target_name,
         "reservation_id": reservation.reservation_id,
         "participant_ids": [item.user_id for item in reservation.participants],
         "participant_names": [item.display_name for item in reservation.participants],
         "participant_count": len(reservation.participants),
+        "force_mode": reservation.force_mode or "",
+        "protection_level": max(0, reservation.protection_required - 1),
+        "reservation_owner_id": reservation.owner_id if reservation.force_mode == "super" else "",
+        "reservation_owner_name": reservation.owner_name if reservation.force_mode == "super" else "",
     })
 
 
@@ -84,10 +88,21 @@ def record_roast_event_with_status(
             "backfire_victim_id": req.backfire_victim_id,
             "backfire_victim_name": req.backfire_victim_name,
         }
+        if req.backfire_victim_ids:
+            participant_snapshot["backfire_victim_ids"] = req.backfire_victim_ids
+            participant_snapshot["backfire_victim_names"] = req.backfire_victim_names
     if req.special_reason:
         # 特殊形态也可能来自普通事件；没有预约时只保存原因，不伪造参与者字段。
         participant_snapshot = participant_snapshot or {}
         participant_snapshot["special_reason"] = req.special_reason
+    if req.force_mode or req.protection_level or req.backfire_victim_ids or req.reservation_owner_id:
+        participant_snapshot = participant_snapshot or {}
+        participant_snapshot.update({
+            "force_mode": req.force_mode, "protection_level": req.protection_level,
+            "reservation_owner_id": req.reservation_owner_id, "reservation_owner_name": req.reservation_owner_name,
+            "backfire_victim_id": req.backfire_victim_id, "backfire_victim_name": req.backfire_victim_name,
+            "backfire_victim_ids": req.backfire_victim_ids, "backfire_victim_names": req.backfire_victim_names,
+        })
 
     session.add(
         RoastEvent(

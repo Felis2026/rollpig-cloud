@@ -186,6 +186,9 @@ class GroupProtection(Base):
     protect_date: Mapped[dt.date] = mapped_column(Date, nullable=False)
     group_id: Mapped[str] = mapped_column(String(64), nullable=False)
     user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    roast_success_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    base_level: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    consecutive_days: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
 
@@ -208,7 +211,7 @@ class UnrolledRoastAttempt(Base):
 class RoastReservation(Base):
     __tablename__ = "roast_reservations"
     __table_args__ = (
-        UniqueConstraint("date_str", "group_id", "target_id", name="uq_roast_reservation_date_group_target"),
+        UniqueConstraint("date_str", "group_id", "target_id", "active_slot", name="uq_roast_reservation_active_target"),
         Index("ix_roast_reservations_target_status", "date_str", "target_id", "status"),
         Index("ix_roast_reservations_delivery_status", "date_str", "delivery_bot_id", "status"),
     )
@@ -226,6 +229,12 @@ class RoastReservation(Base):
     delivery_bot_id: Mapped[str] = mapped_column(String(64), nullable=False)
     force_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    # 进行中的场次占用 1，结束后置空；NULL 允许同日保留多场历史结果。
+    active_slot: Mapped[int | None] = mapped_column(Integer, nullable=True, default=1, server_default="1")
+    protection_required: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    force_operator_id: Mapped[str] = mapped_column(String(64), nullable=False, default="", server_default="")
+    force_operator_name: Mapped[str] = mapped_column(String(128), nullable=False, default="", server_default="")
+    force_feed_user_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
     outcome_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     daily_feed_results: Mapped[list | None] = mapped_column(JSON, nullable=True)
     claim_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -264,6 +273,7 @@ class RoastReservationParticipant(Base):
     user_id: Mapped[str] = mapped_column(String(64), nullable=False)
     display_name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
     pig_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    contribution: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     joined_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
 
