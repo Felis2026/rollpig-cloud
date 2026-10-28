@@ -68,18 +68,28 @@ def replace_group(
             sources = protection_sources(row)
             sources.pop("daily", None)
             sources.pop("legacy", None)
+            legacy = session.scalar(select(GroupProtection).where(
+                GroupProtection.protect_date == req.protect_date,
+                GroupProtection.group_id == "__all__",
+                GroupProtection.user_id == user_id,
+            ).with_for_update().execution_options(populate_existing=True)) if req.group_id != "__all__" else None
             if sources:
+                baselines = dict(row.source_baselines or {})
+                if legacy is not None:
+                    # 群内其他来源会遮住全局回退，保留继承等级及本群后续破防的升级。
+                    inherited_level = protection_levels(row).get("legacy", 0)
+                    global_level = protection_level(legacy)
+                    if global_level > inherited_level:
+                        sources["legacy"] = global_level
+                        baselines["legacy"] = row.roast_success_count
+                    else:
+                        sources["legacy"] = protection_sources(row)["legacy"]
                 row.source_levels = sources
-                row.source_baselines = {source: value for source, value in (row.source_baselines or {}).items() if source in sources}
+                row.source_baselines = {source: value for source, value in baselines.items() if source in sources}
                 row.base_level = max(sources.values())
                 row.consecutive_days = 0
                 sync_pending_protection(session, row)
             else:
-                legacy = session.scalar(select(GroupProtection).where(
-                    GroupProtection.protect_date == req.protect_date,
-                    GroupProtection.group_id == "__all__",
-                    GroupProtection.user_id == user_id,
-                ).with_for_update()) if req.group_id != "__all__" else None
                 if legacy is None:
                     sync_pending_protection(session, row, removed=True)
                 else:

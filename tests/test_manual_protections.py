@@ -286,6 +286,44 @@ class ManualProtectionTests(unittest.TestCase):
         self.assertTrue(protections.check_protected(DATE, "100", "2", self.session).protected)
         self.assertEqual(row.protection_required, 2)
 
+    def test_daily_replacement_preserves_global_protection_with_manual_source(self):
+        self.session.add(GroupProtection(group_id="__all__", user_id="2", protect_date=DATE, base_level=4))
+        self.session.commit()
+        self.grant(2)
+        self.prepare()
+        for daily_users in ([], ["2"], []):
+            self.replace_daily(daily_users)
+            state = protections.check_protected(DATE, "100", "2", self.session)
+            reservation = self.session.scalar(select(RoastReservation))
+            self.assertEqual((state.level, reservation.protection_required), (4, 5))
+        row = self.row()
+        row.roast_success_count += 1
+        self.session.commit()
+        self.replace_daily([])
+        self.assertEqual(protections.check_protected(DATE, "100", "2", self.session).level, 5)
+        self.assertEqual(self.session.scalar(select(RoastReservation)).protection_required, 6)
+
+    def test_surviving_manual_source_imports_global_level_without_old_breakthroughs(self):
+        self.replace_daily(["2"])
+        row = self.row()
+        row.roast_success_count = 2
+        self.session.commit()
+        self.grant(1)
+        self.session.add(GroupProtection(group_id="__all__", user_id="2", protect_date=DATE, base_level=4))
+        self.session.commit()
+        self.replace_daily([])
+        state = protections.check_protected(DATE, "100", "2", self.session)
+        self.assertEqual((state.level, state.source), (4, "legacy"))
+        self.assertEqual(row.source_baselines, {"manual": 2, "legacy": 2})
+        self.prepare()
+        self.assertEqual(self.session.scalar(select(RoastReservation)).protection_required, 5)
+        row.roast_success_count += 1
+        self.session.commit()
+        self.replace_daily([])
+        self.assertEqual(protections.check_protected(DATE, "100", "2", self.session).level, 5)
+        global_row = self.session.scalar(select(GroupProtection).where(GroupProtection.group_id == "__all__"))
+        self.assertEqual((global_row.base_level, global_row.roast_success_count), (4, 0))
+
     def test_new_bot_takes_pending_legacy_delivery_without_changing_paid_roster(self):
         self.prepare(delivery_bot_id="old", supports_protection_gathering=False, protection_gathering_version=0)
         self.grant(3)
