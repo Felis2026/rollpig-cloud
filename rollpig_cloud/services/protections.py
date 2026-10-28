@@ -30,6 +30,20 @@ def protection_level(row: GroupProtection) -> int:
     return max(protection_levels(row).values(), default=0)
 
 
+def inherit_global_protection(row: GroupProtection, group_id: str) -> GroupProtection:
+    """生成未入库的群内全局保护副本，按当前等级继承，本群破防和日报连续天数从零计。"""
+    level = protection_level(row)
+    return GroupProtection(protect_date=row.protect_date, group_id=group_id, user_id=row.user_id,
+                           base_level=level, roast_success_count=0, consecutive_days=0,
+                           source_levels={"legacy": level}, source_baselines={"legacy": 0})
+
+
+def is_historical_daily_protection(row: GroupProtection) -> bool:
+    """按来源和连续天数识别尚未标为 daily 的历史日报保护。"""
+    sources = protection_sources(row)
+    return "legacy" in sources and "daily" not in sources and row.consecutive_days > 0
+
+
 def sync_pending_protection(session: Session, row: GroupProtection, *, removed: bool = False, group_id: str | None = None) -> None:
     """同步等待中场次的门槛，removed 为真时恢复普通预约。
 

@@ -15,7 +15,7 @@ from ..schemas import (
     RoastReservationPrepareResponse,
 )
 from .usage import consume_force_usage, consume_roast_usage
-from .protections import protection_level, protection_source
+from .protections import inherit_global_protection, protection_level, protection_source
 from .roast_refills import mark_group_active_users
 
 
@@ -136,7 +136,7 @@ def prepare_reservation(
         ).with_for_update())
         if legacy is not None and req.supports_protection_gathering:
             # 旧全局保护仍生效，合烤等级按群分别保存。
-            protection = GroupProtection(protect_date=req.date_str, group_id=req.group_id, user_id=req.target_id)
+            protection = inherit_global_protection(legacy, req.group_id)
             session.add(protection)
             session.flush()
         elif legacy is not None:

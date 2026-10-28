@@ -13,7 +13,10 @@ from ..db import get_session, run_transaction_with_sqlite_lock_retry
 from ..models import GroupProtection
 from ..schemas import GrantProtectionRequest, GrantProtectionResponse, ProtectedResponse, ReplaceGroupProtectionsRequest
 from ..services.key_usage import record_key_mutation_outcome
-from ..services.protections import protection_level, protection_levels, protection_source, protection_sources, sync_pending_protection
+from ..services.protections import (
+    inherit_global_protection, is_historical_daily_protection, protection_level, protection_levels,
+    protection_source, protection_sources, sync_pending_protection,
+)
 
 router = APIRouter(prefix="/v1/protections", tags=["protections"], dependencies=[Depends(verify_token)])
 
@@ -67,47 +70,55 @@ def replace_group(
             row = current[user_id]
             sources = protection_sources(row)
             sources.pop("daily", None)
-            sources.pop("legacy", None)
+            historical_daily = is_historical_daily_protection(row)
+            if historical_daily:
+                sources.pop("legacy", None)
             legacy = session.scalar(select(GroupProtection).where(
                 GroupProtection.protect_date == req.protect_date,
                 GroupProtection.group_id == "__all__",
                 GroupProtection.user_id == user_id,
             ).with_for_update().execution_options(populate_existing=True)) if req.group_id != "__all__" else None
+            baselines = dict(row.source_baselines or {})
+            if legacy is None:
+                sources.pop("legacy", None)
+            else:
+                # 全局来源独立于日报保留，本群破防升级也随继承来源保存。
+                inherited_level = protection_levels(row).get("legacy", 0) if not historical_daily else 0
+                global_level = protection_level(legacy)
+                if global_level > inherited_level:
+                    sources["legacy"] = global_level
+                    baselines["legacy"] = row.roast_success_count
             if sources:
-                baselines = dict(row.source_baselines or {})
-                if legacy is not None:
-                    # 群内其他来源会遮住全局回退，保留继承等级及本群后续破防的升级。
-                    inherited_level = protection_levels(row).get("legacy", 0)
-                    global_level = protection_level(legacy)
-                    if global_level > inherited_level:
-                        sources["legacy"] = global_level
-                        baselines["legacy"] = row.roast_success_count
-                    else:
-                        sources["legacy"] = protection_sources(row)["legacy"]
                 row.source_levels = sources
                 row.source_baselines = {source: value for source, value in baselines.items() if source in sources}
                 row.base_level = max(sources.values())
                 row.consecutive_days = 0
                 sync_pending_protection(session, row)
             else:
-                if legacy is None:
-                    sync_pending_protection(session, row, removed=True)
-                else:
-                    sync_pending_protection(session, legacy, group_id=req.group_id)
+                sync_pending_protection(session, row, removed=True)
                 session.delete(row)
                 deleted += 1
         for user_id in user_ids:
             row = current.get(user_id)
+            if row is None and req.group_id != "__all__":
+                legacy = session.scalar(select(GroupProtection).where(
+                    GroupProtection.protect_date == req.protect_date,
+                    GroupProtection.group_id == "__all__",
+                    GroupProtection.user_id == user_id,
+                ).with_for_update().execution_options(populate_existing=True))
+                if legacy is not None:
+                    row = inherit_global_protection(legacy, req.group_id)
+                    session.add(row)
             sources = protection_sources(row) if row is not None else {}
             if "daily" in sources:
                 continue
             yesterday = previous.get(user_id)
             previous_days = yesterday.consecutive_days if yesterday is not None else 0
             days = previous_days + 1 if previous_days else 1
-            # 历史名单再次确认获券时保留原起始等级与连续天数。
-            daily_level = sources.pop("legacy", 0)
             baselines = dict(row.source_baselines or {}) if row is not None else {}
-            if daily_level and row is not None:
+            if row is not None and is_historical_daily_protection(row):
+                # 只有历史日报记录可转为 daily，继承的全局来源继续独立保留。
+                daily_level = sources.pop("legacy")
                 days = row.consecutive_days
                 baselines["daily"] = baselines.pop("legacy", 0)
             else:
@@ -166,10 +177,10 @@ def grant_protection(
                 GroupProtection.group_id == "__all__",
                 GroupProtection.user_id == req.user_id,
             ).with_for_update().execution_options(populate_existing=True))
-            row = GroupProtection(protect_date=req.protect_date, group_id=req.group_id, user_id=req.user_id,
-                                  base_level=legacy.base_level if legacy else req.level,
-                                  consecutive_days=0, roast_success_count=legacy.roast_success_count if legacy else 0,
-                                  source_levels={"legacy": legacy.base_level} if legacy else {"manual": req.level})
+            row = inherit_global_protection(legacy, req.group_id) if legacy is not None else GroupProtection(
+                protect_date=req.protect_date, group_id=req.group_id, user_id=req.user_id,
+                base_level=req.level, consecutive_days=0, roast_success_count=0, source_levels={"manual": req.level},
+            )
             session.add(row)
         if not created or legacy is not None:
             level = protection_level(row)

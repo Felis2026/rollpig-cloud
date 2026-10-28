@@ -324,6 +324,123 @@ class ManualProtectionTests(unittest.TestCase):
         global_row = self.session.scalar(select(GroupProtection).where(GroupProtection.group_id == "__all__"))
         self.assertEqual((global_row.base_level, global_row.roast_success_count), (4, 0))
 
+    def test_inherited_global_and_daily_sources_have_independent_streaks(self):
+        for entry in ("grant", "reservation", "daily"):
+            with self.subTest(entry=entry):
+                self.session.query(RoastReservationParticipant).delete()
+                self.session.query(RoastReservation).delete()
+                self.session.query(GroupProtection).delete()
+                self.session.add(GroupProtection(group_id="__all__", user_id="2", protect_date=DATE, base_level=4))
+                self.session.commit()
+                if entry == "grant":
+                    self.grant(2)
+                elif entry == "reservation":
+                    self.assertEqual(self.prepare().reservation.protection_required, 5)
+                self.replace_daily(["2"])
+                row = self.row()
+                self.assertEqual((row.source_levels["legacy"], row.source_levels["daily"], row.consecutive_days), (4, 3, 1))
+                for _ in range(2):
+                    self.replace_daily(["2"])
+                    self.assertEqual((row.source_levels["daily"], row.consecutive_days), (3, 1))
+                self.replace_daily(["2"], DATE + dt.timedelta(days=1))
+                tomorrow = self.session.scalar(select(GroupProtection).where(
+                    GroupProtection.group_id == "100", GroupProtection.protect_date == DATE + dt.timedelta(days=1),
+                ))
+                self.assertEqual((tomorrow.source_levels, tomorrow.consecutive_days), ({"daily": 4}, 2))
+
+    def test_global_inheritance_keeps_effective_level_without_daily_streak(self):
+        for entry in ("grant", "reservation"):
+            with self.subTest(entry=entry):
+                self.session.query(RoastReservationParticipant).delete()
+                self.session.query(RoastReservation).delete()
+                self.session.query(GroupProtection).delete()
+                self.session.add(GroupProtection(group_id="__all__", user_id="2", protect_date=DATE,
+                    base_level=5, roast_success_count=3, source_levels={"manual": 4}, source_baselines={"manual": 3}))
+                self.session.commit()
+                if entry == "grant":
+                    self.assertEqual(self.grant(2).level, 4)
+                else:
+                    self.assertEqual(self.prepare().reservation.protection_required, 5)
+                row = self.row()
+                self.assertEqual((row.source_levels["legacy"], row.roast_success_count, row.consecutive_days), (4, 0, 0))
+                self.grant(2, group_id="200")
+                row.roast_success_count = 1
+                self.session.commit()
+                self.assertEqual(protections.check_protected(DATE, "100", "2", self.session).level, 5)
+                self.assertEqual(protections.check_protected(DATE, "200", "2", self.session).level, 4)
+                self.assertEqual(protections.check_protected(DATE, "300", "2", self.session).level, 4)
+                self.replace_daily(["2"], DATE + dt.timedelta(days=1))
+                tomorrow = self.session.scalar(select(GroupProtection).where(
+                    GroupProtection.group_id == "100", GroupProtection.protect_date == DATE + dt.timedelta(days=1),
+                ))
+                self.assertEqual((tomorrow.source_levels, tomorrow.consecutive_days), ({"daily": 3}, 1))
+
+    def test_daily_add_remove_keeps_inherited_upgrades_and_resets_only_daily_streak(self):
+        self.session.add(GroupProtection(group_id="__all__", user_id="2", protect_date=DATE, base_level=4))
+        self.session.commit()
+        self.prepare()
+        row = self.row()
+        row.roast_success_count = 1
+        self.session.commit()
+        for users in ([], ["2"], [], [], ["2"]):
+            self.replace_daily(users)
+            row = self.row()
+            self.assertIsNotNone(row)
+            state = protections.check_protected(DATE, "100", "2", self.session)
+            self.assertEqual((state.level, row.consecutive_days), (5, int(bool(users))))
+            self.assertEqual(self.session.scalar(select(RoastReservation)).protection_required, 6)
+            if users:
+                self.assertEqual((row.source_levels["daily"], row.source_baselines["daily"]), (3, 1))
+            else:
+                self.assertEqual(row.source_levels, {"legacy": 4})
+
+    def test_historical_daily_records_preserve_streaks_before_and_after_manual_grants(self):
+        for manual in (False, True):
+            with self.subTest(manual=manual):
+                self.session.query(GroupProtection).delete()
+                self.session.add(GroupProtection(group_id="100", user_id="2", protect_date=DATE,
+                    base_level=4, consecutive_days=2, roast_success_count=1))
+                self.session.commit()
+                if manual:
+                    self.grant(2)
+                self.replace_daily(["2"])
+                row = self.row()
+                self.assertEqual((row.source_levels["daily"], row.consecutive_days, row.roast_success_count), (4, 2, 1))
+                self.assertNotIn("legacy", row.source_levels)
+                self.replace_daily(["2"])
+                self.assertEqual((row.source_levels["daily"], row.consecutive_days), (4, 2))
+                self.replace_daily(["2"], DATE + dt.timedelta(days=1))
+                tomorrow = self.session.scalar(select(GroupProtection).where(
+                    GroupProtection.group_id == "100", GroupProtection.protect_date == DATE + dt.timedelta(days=1),
+                ))
+                self.assertEqual((tomorrow.source_levels, tomorrow.consecutive_days), ({"daily": 5}, 3))
+
+    def test_removing_daily_award_breaks_streak_even_when_global_and_manual_remain(self):
+        self.session.add(GroupProtection(group_id="__all__", user_id="2", protect_date=DATE, base_level=4))
+        self.session.commit()
+        self.grant(2)
+        self.replace_daily(["2"])
+        self.replace_daily([])
+        self.assertEqual((self.row().source_levels, self.row().consecutive_days), ({"legacy": 4, "manual": 2}, 0))
+        self.replace_daily(["2"], DATE + dt.timedelta(days=1))
+        tomorrow = self.session.scalar(select(GroupProtection).where(
+            GroupProtection.group_id == "100", GroupProtection.protect_date == DATE + dt.timedelta(days=1),
+        ))
+        self.assertEqual((tomorrow.source_levels, tomorrow.consecutive_days), ({"daily": 3}, 1))
+
+    def test_withdrawn_global_source_leaves_manual_without_resetting_its_upgrades(self):
+        self.session.add(GroupProtection(group_id="__all__", user_id="2", protect_date=DATE, base_level=4))
+        self.session.commit()
+        self.grant(2)
+        self.replace_daily(["2"])
+        row = self.row()
+        row.roast_success_count = 1
+        self.session.query(GroupProtection).filter(GroupProtection.group_id == "__all__").delete()
+        self.session.commit()
+        self.replace_daily([])
+        self.assertEqual((row.source_levels, row.consecutive_days), ({"manual": 2}, 0))
+        self.assertEqual(protections.check_protected(DATE, "100", "2", self.session).level, 3)
+
     def test_new_bot_takes_pending_legacy_delivery_without_changing_paid_roster(self):
         self.prepare(delivery_bot_id="old", supports_protection_gathering=False, protection_gathering_version=0)
         self.grant(3)
