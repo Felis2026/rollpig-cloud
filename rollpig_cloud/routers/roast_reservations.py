@@ -222,6 +222,14 @@ def claim(req: RoastReservationClaimRequest, session: Session = Depends(get_sess
         for reservation_id in req.excluded_reservation_ids[:64]
         if reservation_id
     }
+    if req.supports_protection_gathering and req.protection_gathering_version >= 2:
+        # 升级后的原发送者通过现有轮询声明能力，旧场次无需仅因迁移缺少记录就换人。
+        session.execute(update(RoastReservation).where(
+            RoastReservation.delivery_bot_id == req.delivery_bot_id,
+            RoastReservation.date_str == req.date_str,
+            RoastReservation.status.in_(("pending", "ready")),
+            RoastReservation.delivery_gathering_version < 2,
+        ).values(delivery_gathering_version=2))
     claim_query = (
         select(RoastReservation)
         .where(
@@ -312,7 +320,8 @@ def _prepare_outcome_once(
         row.outcome_snapshot = req.outcome_snapshot
         if protection is not None and str(req.outcome_snapshot.get("event_type") or "") == "success":
             # 与首次结果快照同事务升级；重试只读取已固化快照。
-            protection.roast_success_count = min(4, protection.roast_success_count + 1)
+            # 总次数持续累加，各来源仅计算获得保护之后的增量，等级仍封顶五级。
+            protection.roast_success_count += 1
         # ================================ 预约加餐结算 ================================ #
         # 只有新客户端明确声明、普通预约且结果成功时结算。结果与预约快照在同一
         # 事务中固化，重领时只读取已保存结果，不会重复成长或改变群内提示。

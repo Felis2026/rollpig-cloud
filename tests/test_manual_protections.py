@@ -23,8 +23,9 @@ from rollpig_cloud.db import Base, get_session
 from rollpig_cloud.migrations import ensure_runtime_migrations
 from rollpig_cloud.models import DailyRoll, GroupProtection, RoastReservation, RoastReservationParticipant
 from rollpig_cloud.routers import protections
-from rollpig_cloud.routers.roast_reservations import prepare
-from rollpig_cloud.schemas import GrantProtectionRequest, ReplaceGroupProtectionsRequest, RoastReservationPrepareRequest
+from rollpig_cloud.routers.roast_reservations import claim, prepare, prepare_outcome
+from rollpig_cloud.schemas import (GrantProtectionRequest, ReplaceGroupProtectionsRequest, RoastReservationClaimRequest,
+                                   RoastReservationOutcomeRequest, RoastReservationPrepareRequest)
 from rollpig_cloud.services.reservations import activate_target_reservations
 
 
@@ -117,8 +118,9 @@ class ManualProtectionTests(unittest.TestCase):
         row.roast_success_count = 1
         self.session.commit()
         self.assertEqual(self.grant(5).level, 5)
-        self.assertEqual((row.base_level, row.roast_success_count), (4, 1))
-        self.assertEqual(row.source_levels, {"daily": 3, "manual": 4})
+        self.assertEqual((row.base_level, row.roast_success_count), (5, 1))
+        self.assertEqual(row.source_levels, {"daily": 3, "manual": 5})
+        self.assertEqual(row.source_baselines, {"daily": 0, "manual": 1})
         self.assertFalse(self.grant(5).changed)
         row.roast_success_count = 2
         self.session.commit()
@@ -197,6 +199,162 @@ class ManualProtectionTests(unittest.TestCase):
         self.grant()
         self.assertEqual(self.prepare(supports_protection_gathering=False, protection_gathering_version=0).status, "protected")
 
+    def arrive_target(self):
+        """登记目标到场，并通过实际激活入口更新本场状态。"""
+        self.session.add(DailyRoll(date_str=DATE, user_id="2", pig_id="pig"))
+        self.session.flush()
+        activate_target_reservations(self.session, date_str=DATE, target_id="2", target_pig_id="pig")
+        self.session.commit()
+
+    def claim_for(self, bot="bot", supported=True):
+        return claim(RoastReservationClaimRequest(delivery_bot_id=bot, date_str=DATE, supports_prepared=True,
+                     supports_protection_gathering=supported, protection_gathering_version=2 if supported else 0), self.session)
+
+    def test_new_manual_source_ignores_old_breakthroughs_and_keeps_later_upgrades(self):
+        self.replace_daily(["2"])
+        row = self.row()
+        row.roast_success_count = 2
+        self.session.commit()
+        self.assertEqual(self.grant(1).level, 5)
+        self.replace_daily([])
+        self.assertEqual(protections.check_protected(DATE, "100", "2", self.session).level, 1)
+        self.assertEqual(row.source_baselines, {"manual": 2})
+        row.roast_success_count += 1
+        self.session.commit()
+        result = self.grant(1)
+        self.assertEqual((result.level, result.changed), (2, False))
+        self.assertEqual(row.source_baselines, {"manual": 2})
+        self.assertEqual(self.grant(3).level, 3)
+        self.assertEqual(row.source_baselines, {"manual": 3})
+
+    def test_new_source_can_still_upgrade_after_four_previous_breakthroughs(self):
+        self.replace_daily(["2"])
+        row = self.row()
+        row.roast_success_count = 4
+        self.session.commit()
+        self.grant(1)
+        self.replace_daily([])
+        self.arrive_target()
+        self.prepare()
+        self.prepare("4")
+        item = self.claim_for().items[0]
+        request = RoastReservationOutcomeRequest(reservation_id=item.reservation_id, claim_token=item.claim_token,
+                                                outcome_snapshot={"event_type": "success"})
+        self.assertTrue(prepare_outcome(request, self.session).ok)
+        self.assertTrue(prepare_outcome(request, self.session).ok)
+        self.assertEqual(row.roast_success_count, 5)
+        self.assertEqual(protections.check_protected(DATE, "100", "2", self.session).level, 2)
+
+    def test_new_daily_source_does_not_inherit_manual_breakthroughs(self):
+        self.grant(1)
+        row = self.row()
+        row.roast_success_count = 2
+        self.session.commit()
+        self.replace_daily(["2"])
+        state = protections.check_protected(DATE, "100", "2", self.session)
+        self.assertEqual((state.level, state.daily_base_level, state.source), (3, 3, "daily"))
+        self.assertEqual(row.source_baselines, {"daily": 2})
+
+    def test_removing_last_source_restores_ordinary_reservation_before_or_after_arrival(self):
+        for index, arrived in enumerate((False, True)):
+            with self.subTest(arrived=arrived):
+                self.session.query(DailyRoll).delete()
+                self.session.query(RoastReservationParticipant).delete()
+                self.session.query(RoastReservation).delete()
+                self.session.commit()
+                self.prepare(user=str(30 + index))
+                self.replace_daily(["2"])
+                if arrived:
+                    self.arrive_target()
+                self.replace_daily([])
+                row = self.session.scalar(select(RoastReservation))
+                self.assertFalse(protections.check_protected(DATE, "100", "2", self.session).protected)
+                self.assertEqual(row.protection_required, 0)
+                self.assertEqual(row.status, "ready" if arrived else "pending")
+                if not arrived:
+                    self.arrive_target()
+                self.assertEqual(row.status, "ready")
+                self.assertEqual(len(self.claim_for(supported=False).items), 1)
+
+    def test_removing_group_source_keeps_legacy_global_protection(self):
+        self.prepare()
+        self.replace_daily(["2"])
+        self.session.add(GroupProtection(group_id="__all__", user_id="2", protect_date=DATE, base_level=1))
+        self.session.commit()
+        self.replace_daily([])
+        row = self.session.scalar(select(RoastReservation))
+        self.assertTrue(protections.check_protected(DATE, "100", "2", self.session).protected)
+        self.assertEqual(row.protection_required, 2)
+
+    def test_new_bot_takes_pending_legacy_delivery_without_changing_paid_roster(self):
+        self.prepare(delivery_bot_id="old", supports_protection_gathering=False, protection_gathering_version=0)
+        self.grant(3)
+        result = self.prepare("4", delivery_bot_id="new")
+        self.assertEqual(result.reservation.delivery_bot_id, "new")
+        self.prepare("5", delivery_bot_id="new")
+        self.prepare("6", delivery_bot_id="new")
+        self.arrive_target()
+        self.assertFalse(self.claim_for("old", supported=False).items)
+        first = self.claim_for("new").items
+        self.assertEqual(len(first), 1)
+        self.assertEqual(first[0].owner_id, "3")
+        self.assertEqual([item.user_id for item in first[0].participants], ["3", "4", "5", "6"])
+        self.assertFalse(self.claim_for("new").items)
+
+    def test_new_bot_can_take_unclaimed_ready_legacy_delivery_without_joining(self):
+        self.prepare(delivery_bot_id="old", supports_protection_gathering=False, protection_gathering_version=0)
+        self.prepare("4", delivery_bot_id="old", supports_protection_gathering=False, protection_gathering_version=0)
+        self.grant(1)
+        self.arrive_target()
+        result = self.prepare("5", delivery_bot_id="new")
+        self.assertEqual((result.status, result.reservation.status, result.reservation.delivery_bot_id), ("reservation_busy", "ready", "new"))
+        self.assertEqual([item.user_id for item in result.reservation.participants], ["3", "4"])
+        self.assertFalse(self.claim_for("old", supported=False).items)
+        self.assertEqual(len(self.claim_for("new").items), 1)
+
+    def test_capable_owner_is_preserved(self):
+        self.prepare(delivery_bot_id="capable")
+        self.grant(3)
+        self.assertEqual(self.prepare("4", delivery_bot_id="other").reservation.delivery_bot_id, "capable")
+
+    def test_full_or_old_protocol_join_cannot_take_delivery_but_existing_member_can(self):
+        for user in ("3", *(str(value) for value in range(10, 21))):
+            self.prepare(user, delivery_bot_id="old", supports_protection_gathering=False, protection_gathering_version=0)
+        self.grant(5)
+        rejected = self.prepare("99", delivery_bot_id="new")
+        self.assertEqual((rejected.status, rejected.reservation.delivery_bot_id), ("reservation_full", "old"))
+        rejected = self.prepare("3", delivery_bot_id="new", protection_gathering_version=1)
+        self.assertEqual(rejected.status, "protected")
+        self.assertEqual(self.session.scalar(select(RoastReservation)).delivery_bot_id, "old")
+        accepted = self.prepare("3", delivery_bot_id="new")
+        self.assertEqual((accepted.status, accepted.reservation.delivery_bot_id), ("already_joined", "new"))
+        self.assertEqual(len(accepted.reservation.participants), 12)
+
+    def test_current_owner_can_confirm_capability_through_existing_claim_poll(self):
+        self.prepare(delivery_bot_id="upgraded", supports_protection_gathering=False, protection_gathering_version=0)
+        self.assertFalse(self.claim_for("upgraded").items)
+        self.grant(3)
+        result = self.prepare("4", delivery_bot_id="other")
+        self.assertEqual(result.reservation.delivery_bot_id, "upgraded")
+
+    def test_fixed_or_claimed_legacy_round_cannot_change_delivery_owner(self):
+        for index, status in enumerate(("processing", "prepared", "sending", "ready")):
+            with self.subTest(status=status):
+                self.session.query(RoastReservationParticipant).delete()
+                self.session.query(RoastReservation).delete()
+                self.session.query(GroupProtection).delete()
+                self.session.commit()
+                self.prepare(user=str(50 + index), delivery_bot_id="old", supports_protection_gathering=False, protection_gathering_version=0)
+                self.grant(1)
+                row = self.session.scalar(select(RoastReservation))
+                row.status = status
+                row.outcome_snapshot = {"event_type": "success"}
+                row.claim_token = "token" if status != "ready" else None
+                self.session.commit()
+                result = self.prepare("99", delivery_bot_id="new")
+                self.assertEqual((result.status, result.reservation.delivery_bot_id), ("reservation_busy", "old"))
+                self.assertEqual(row.outcome_snapshot, {"event_type": "success"})
+
 
 class ManualProtectionMigrationTests(unittest.TestCase):
     def test_old_records_keep_levels_and_gain_nullable_sources_idempotently(self):
@@ -211,7 +369,7 @@ class ManualProtectionMigrationTests(unittest.TestCase):
         self.assertIn("source_levels", {column["name"] for column in inspect(engine).get_columns("group_protections")})
         with Session(engine) as session:
             row = session.scalar(select(GroupProtection))
-            self.assertEqual((row.base_level, row.source_levels), (4, None))
+            self.assertEqual((row.base_level, row.source_levels, row.source_baselines), (4, None, None))
 
 
 class ConcurrentManualProtectionTests(unittest.TestCase):

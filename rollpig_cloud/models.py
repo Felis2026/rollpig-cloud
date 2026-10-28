@@ -186,8 +186,10 @@ class GroupProtection(Base):
     protect_date: Mapped[dt.date] = mapped_column(Date, nullable=False)
     group_id: Mapped[str] = mapped_column(String(64), nullable=False)
     user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    # 总次数持续累加，各来源用自己的基准计算增量，实际等级仍封顶五级。
     roast_success_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     source_levels: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    source_baselines: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     base_level: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     consecutive_days: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
@@ -234,6 +236,8 @@ class RoastReservation(Base):
     active_slot: Mapped[int | None] = mapped_column(Integer, nullable=True, default=1, server_default="1")
     protection_required: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     protection_source: Mapped[str] = mapped_column(String(16), nullable=False, default="legacy", server_default="legacy")
+    # 零表示尚未确认当前发送者支持保护合围，后续请求可补充能力记录。
+    delivery_gathering_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     force_operator_id: Mapped[str] = mapped_column(String(64), nullable=False, default="", server_default="")
     force_operator_name: Mapped[str] = mapped_column(String(128), nullable=False, default="", server_default="")
     force_feed_user_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)

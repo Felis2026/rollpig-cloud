@@ -15,11 +15,35 @@ from ..schemas import (
     RoastReservationPrepareResponse,
 )
 from .usage import consume_force_usage, consume_roast_usage
-from .protections import protection_source
+from .protections import protection_level, protection_source
 from .roast_refills import mark_group_active_users
 
 
 ROAST_RESERVATION_MAX_PARTICIPANTS = 12
+
+
+def can_reassign_protected_delivery(reservation: RoastReservation, req: RoastReservationPrepareRequest) -> bool:
+    """判断当前请求能否接手尚未领取且原发送能力不足的合围场次。"""
+    return bool(
+        reservation.protection_required
+        and reservation.force_mode != "super"
+        and reservation.delivery_gathering_version < 2
+        and reservation.status in {"pending", "ready"}
+        and reservation.outcome_snapshot is None
+        and not reservation.claim_token
+        and req.supports_protection_gathering and req.protection_gathering_version >= 2
+        and req.delivery_bot_id
+    )
+
+
+def _update_delivery_capability(reservation: RoastReservation, req: RoastReservationPrepareRequest) -> None:
+    """在有效参与或待领取接手时记录发送能力，保留业务角色与参与名单。"""
+    if not req.supports_protection_gathering or req.protection_gathering_version < 2:
+        return
+    if can_reassign_protected_delivery(reservation, req):
+        reservation.delivery_bot_id = req.delivery_bot_id
+    if reservation.delivery_bot_id == req.delivery_bot_id:
+        reservation.delivery_gathering_version = 2
 
 
 def _locked_participants(session: Session, reservation_id: str) -> list[RoastReservationParticipant]:
@@ -149,6 +173,8 @@ def prepare_reservation(
     if reservation:
         members = _locked_participants(session, reservation.reservation_id)
         if reservation.status != "pending":
+            if can_reassign_protected_delivery(reservation, req):
+                _update_delivery_capability(reservation, req)
             return RoastReservationPrepareResponse(
                 status="reservation_busy", reservation=reservation_to_schema(session, reservation, participants=members),
             )
@@ -173,6 +199,7 @@ def prepare_reservation(
             reservation.force_mode = "super"
             # 接管后的场次只允许新客户端领取，由声明能力的请求 Bot 负责投递。
             reservation.delivery_bot_id = req.delivery_bot_id
+            reservation.delivery_gathering_version = 2
             mark_group_active_users(session, date_str=req.date_str, group_id=req.group_id, user_ids=[req.attacker_id])
             session.flush()
             arrived_pig_id = reservation.target_pig_id or (target_roll.pig_id if target_roll else "")
@@ -183,6 +210,7 @@ def prepare_reservation(
         boosted = bool(reservation.protection_required and req.force_mode == "normal")
         upgrading = participant is not None and boosted
         if participant and not (boosted and participant.contribution < 2) and req.force_mode != "super":
+            _update_delivery_capability(reservation, req)
             return RoastReservationPrepareResponse(
                 status="already_joined",
                 reservation=reservation_to_schema(session, reservation, participants=members),
@@ -206,6 +234,7 @@ def prepare_reservation(
             members.append(participant)
         elif boosted:
             participant.contribution = 2
+        _update_delivery_capability(reservation, req)
         if req.force_mode == "super" and reservation.protection_required:
             reservation.force_mode = "super"
         mark_group_active_users(
@@ -258,9 +287,10 @@ def prepare_reservation(
         owner_name=req.attacker_name,
         owner_pig_id=req.attacker_pig_id,
         delivery_bot_id=req.delivery_bot_id,
+        delivery_gathering_version=2 if req.supports_protection_gathering and req.protection_gathering_version >= 2 else 0,
         force_mode=req.force_mode,
         status="pending",
-        protection_required=(1 + min(5, protection.base_level + protection.roast_success_count)
+        protection_required=(1 + protection_level(protection)
                              if protection is not None and req.supports_protection_gathering else 0),
         protection_source=protection_source(protection) if protection is not None else "legacy",
     )

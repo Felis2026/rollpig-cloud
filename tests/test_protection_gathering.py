@@ -162,7 +162,7 @@ class CloudProtectionGatheringTests(unittest.TestCase):
                 prepare(self.request(f"r{index}-{number}"), self.session)
             self.finish()
         self.assertEqual(len(self.session.scalars(select(RoastReservation)).all()), 6)
-        self.assertEqual(self.session.scalar(select(GroupProtection)).roast_success_count, 4)
+        self.assertEqual(self.session.scalar(select(GroupProtection)).roast_success_count, 6)
 
     def test_escape_and_backfire_do_not_increase_level(self):
         self.arrive()

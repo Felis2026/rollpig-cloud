@@ -13,7 +13,7 @@ from ..db import get_session, run_transaction_with_sqlite_lock_retry
 from ..models import GroupProtection
 from ..schemas import GrantProtectionRequest, GrantProtectionResponse, ProtectedResponse, ReplaceGroupProtectionsRequest
 from ..services.key_usage import record_key_mutation_outcome
-from ..services.protections import protection_source, protection_sources, sync_pending_protection
+from ..services.protections import protection_level, protection_levels, protection_source, protection_sources, sync_pending_protection
 
 router = APIRouter(prefix="/v1/protections", tags=["protections"], dependencies=[Depends(verify_token)])
 
@@ -70,10 +70,20 @@ def replace_group(
             sources.pop("legacy", None)
             if sources:
                 row.source_levels = sources
+                row.source_baselines = {source: value for source, value in (row.source_baselines or {}).items() if source in sources}
                 row.base_level = max(sources.values())
                 row.consecutive_days = 0
                 sync_pending_protection(session, row)
             else:
+                legacy = session.scalar(select(GroupProtection).where(
+                    GroupProtection.protect_date == req.protect_date,
+                    GroupProtection.group_id == "__all__",
+                    GroupProtection.user_id == user_id,
+                ).with_for_update()) if req.group_id != "__all__" else None
+                if legacy is None:
+                    sync_pending_protection(session, row, removed=True)
+                else:
+                    sync_pending_protection(session, legacy, group_id=req.group_id)
                 session.delete(row)
                 deleted += 1
         for user_id in user_ids:
@@ -86,16 +96,20 @@ def replace_group(
             days = previous_days + 1 if previous_days else 1
             # 历史名单再次确认获券时保留原起始等级与连续天数。
             daily_level = sources.pop("legacy", 0)
+            baselines = dict(row.source_baselines or {}) if row is not None else {}
             if daily_level and row is not None:
                 days = row.consecutive_days
+                baselines["daily"] = baselines.pop("legacy", 0)
             else:
                 daily_level = min(5, req.initial_level + days - 1)
+                baselines["daily"] = row.roast_success_count if row is not None else 0
             sources["daily"] = daily_level
             if row is None:
                 row = GroupProtection(protect_date=req.protect_date, group_id=req.group_id, user_id=user_id,
                                       roast_success_count=0)
                 session.add(row)
             row.source_levels = sources
+            row.source_baselines = baselines
             row.base_level = max(sources.values())
             row.consecutive_days = days
             sync_pending_protection(session, row)
@@ -148,18 +162,21 @@ def grant_protection(
                                   source_levels={"legacy": legacy.base_level} if legacy else {"manual": req.level})
             session.add(row)
         if not created or legacy is not None:
-            level = min(5, row.base_level + row.roast_success_count)
+            level = protection_level(row)
             changed = req.level > level
             sources = protection_sources(row)
-            # 申请等级是发放后的实际等级，不能再次叠加已有破防升级。
-            sources["manual"] = max(sources.get("manual", 0), max(1, req.level - row.roast_success_count))
+            baselines = dict(row.source_baselines or {})
+            if req.level > protection_levels(row).get("manual", 0):
+                sources["manual"] = req.level
+                baselines["manual"] = row.roast_success_count
             row.source_levels = sources
+            row.source_baselines = baselines
             row.base_level = max(sources.values())
         else:
             changed = True
         session.flush()
         sync_pending_protection(session, row)
-        result = GrantProtectionResponse(level=min(5, row.base_level + row.roast_success_count), changed=changed)
+        result = GrantProtectionResponse(level=protection_level(row), changed=changed)
         record_key_mutation_outcome(session, identity, operation="POST /v1/protections/grant",
                                    created_records=int(created),
                                    updated_records=int(not created and old_sources != row.source_levels),
@@ -180,7 +197,7 @@ def check_protected(protect_date: dt.date, group_id: str, user_id: str, session:
         ).order_by((GroupProtection.group_id == group_id).desc()).limit(1)
     ).scalar_one_or_none()
     return ProtectedResponse(protected=bool(row), base_level=row.base_level if row else 0,
-                             level=min(5, row.base_level + row.roast_success_count) if row else 0,
+                             level=protection_level(row) if row else 0,
                              consecutive_days=row.consecutive_days if row else 0,
                              source=protection_source(row) if row else "legacy",
                              daily_base_level=(protection_sources(row).get("daily", row.base_level if row.source_levels is None else 0) if row else 0))
