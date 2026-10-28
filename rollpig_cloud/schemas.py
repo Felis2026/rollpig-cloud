@@ -343,6 +343,20 @@ class ProtectedResponse(BaseModel):
     base_level: int = 0
     level: int = 0
     consecutive_days: int = 0
+    source: str = "legacy"
+    daily_base_level: int = 0
+
+
+class GrantProtectionRequest(BaseModel):
+    group_id: str = Field(pattern=r"^[1-9][0-9]{0,19}$")
+    user_id: str = Field(pattern=r"^[1-9][0-9]{0,19}$")
+    level: int = Field(strict=True, ge=1, le=5)
+    protect_date: dt.date
+
+
+class GrantProtectionResponse(BaseModel):
+    level: int
+    changed: bool
 
 
 class CollectionResponse(BaseModel):
@@ -405,6 +419,7 @@ class RoastReservationItem(BaseModel):
     daily_feed_results: list[DailyFeedResult] = Field(default_factory=list)
     claim_token: str = ""
     protection_required: int = 0
+    protection_source: str = "legacy"
     force_operator_id: str = ""
     force_operator_name: str = ""
     force_feed_user_ids: list[str] = Field(default_factory=list)
