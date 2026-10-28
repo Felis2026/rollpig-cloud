@@ -48,6 +48,7 @@
 
 | 客户端 | 推荐组合 | 说明 |
 | --- | --- | --- |
+| RollPig Plus `0.15.1+` | Cloud `0.10.1+` | 支持单人保护手动发放、保护多来源区分与等待中预约门槛动态联动。 |
 | RollPig Plus `0.15.0+` | Cloud `0.10.0+` | 支持聚众烤猪、保护等级递进、个人火力贡献权重、强行点火接管与多人反噬记录。 |
 | RollPig Plus `0.14.2+` | Cloud `0.9.0+` | 支持直接回复 Bot 预约通知加入，持久化消息关联并校验参与资格。 |
 | RollPig Plus `0.14.1+` | Cloud `0.8.0+` | 支持昨日免费补签，按用户与日期幂等结算收藏与成长。 |
@@ -248,7 +249,8 @@ docker run -d \
 | --- | --- | --- |
 | `POST` | `/v1/cooldowns/consume-roast` | 消耗普通烤群友充能，返回剩余次数与恢复时间 |
 | `POST` | `/v1/cooldowns/consume-force` | 消耗强制类操作次数 |
-| `POST` | `/v1/protections/replace-group` | 替换群保护名单与起始等级 |
+| `POST` | `/v1/protections/replace-group` | 替换日报保护名单与起始等级，保留手动保护 |
+| `POST` | `/v1/protections/grant` | 为单个用户发放当前群当日保护，等级 1～5 |
 | `GET` | `/v1/protections/check` | 检查用户是否在群保护名单中 |
 
 ### 预约与聚众烤猪

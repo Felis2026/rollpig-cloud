@@ -2,18 +2,32 @@ from __future__ import annotations
 
 import datetime as dt
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import or_, select, update
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from ..auth import verify_token
-from ..config import ApiKeyIdentity
+from ..config import ApiKeyIdentity, rollpig_today
 from ..db import get_session, run_transaction_with_sqlite_lock_retry
 from ..models import GroupProtection
-from ..schemas import ProtectedResponse, ReplaceGroupProtectionsRequest
+from ..schemas import GrantProtectionRequest, GrantProtectionResponse, ProtectedResponse, ReplaceGroupProtectionsRequest
 from ..services.key_usage import record_key_mutation_outcome
+from ..services.protections import protection_source, protection_sources, sync_pending_protection
 
 router = APIRouter(prefix="/v1/protections", tags=["protections"], dependencies=[Depends(verify_token)])
+
+
+def _run_protection_transaction(session: Session, transaction):
+    """首次插入或 MySQL 行锁竞争失败时，回滚并重做整笔保护写入。"""
+    for attempt in range(3):
+        try:
+            return run_transaction_with_sqlite_lock_retry(session, transaction)
+        except (IntegrityError, OperationalError) as error:
+            session.rollback()
+            mysql_conflict = session.get_bind().dialect.name == "mysql" and getattr(error.orig, "args", (None,))[0] in {1205, 1213}
+            if attempt == 2 or not (isinstance(error, IntegrityError) or mysql_conflict):
+                raise
 
 
 @router.post("/replace-group")
@@ -48,25 +62,112 @@ def replace_group(
             GroupProtection.protect_date == req.protect_date - dt.timedelta(days=1),
         ))}
         removed = set(current) - set(user_ids)
+        deleted = 0
         for user_id in removed:
-            session.delete(current[user_id])
+            row = current[user_id]
+            sources = protection_sources(row)
+            sources.pop("daily", None)
+            sources.pop("legacy", None)
+            if sources:
+                row.source_levels = sources
+                row.base_level = max(sources.values())
+                row.consecutive_days = 0
+                sync_pending_protection(session, row)
+            else:
+                session.delete(row)
+                deleted += 1
         for user_id in user_ids:
-            if user_id in current:
+            row = current.get(user_id)
+            sources = protection_sources(row) if row is not None else {}
+            if "daily" in sources:
                 continue
-            days = previous[user_id].consecutive_days + 1 if user_id in previous else 1
-            session.add(GroupProtection(protect_date=req.protect_date, group_id=req.group_id, user_id=user_id,
-                                        base_level=min(5, req.initial_level + days - 1), consecutive_days=days))
+            yesterday = previous.get(user_id)
+            previous_days = yesterday.consecutive_days if yesterday is not None else 0
+            days = previous_days + 1 if previous_days else 1
+            # 历史名单再次确认获券时保留原起始等级与连续天数。
+            daily_level = sources.pop("legacy", 0)
+            if daily_level and row is not None:
+                days = row.consecutive_days
+            else:
+                daily_level = min(5, req.initial_level + days - 1)
+            sources["daily"] = daily_level
+            if row is None:
+                row = GroupProtection(protect_date=req.protect_date, group_id=req.group_id, user_id=user_id,
+                                      roast_success_count=0)
+                session.add(row)
+            row.source_levels = sources
+            row.base_level = max(sources.values())
+            row.consecutive_days = days
+            sync_pending_protection(session, row)
         record_key_mutation_outcome(
             session,
             identity,
             operation="POST /v1/protections/replace-group",
             created_records=len(set(user_ids) - set(current)),
-            deleted_records=len(removed),
+            deleted_records=deleted,
         )
         session.commit()
         return {"ok": True}
 
-    return run_transaction_with_sqlite_lock_retry(session, transaction)
+    return _run_protection_transaction(session, transaction)
+
+
+@router.post("/grant", response_model=GrantProtectionResponse)
+def grant_protection(
+    req: GrantProtectionRequest,
+    session: Session = Depends(get_session),
+    identity: ApiKeyIdentity = Depends(verify_token),
+):
+    """为单个群友发放当日保护；重复请求与低等级请求保持现有权益。"""
+    def transaction():
+        """同一事务内更新保护来源和等待中的预约，不消费烧烤额度。"""
+        if req.protect_date != rollpig_today():
+            raise HTTPException(status_code=422, detail="protect_date must be today")
+        if session.get_bind().dialect.name == "sqlite":
+            session.execute(update(GroupProtection).where(
+                GroupProtection.group_id == req.group_id,
+                GroupProtection.protect_date == req.protect_date,
+            ).values(base_level=GroupProtection.base_level))
+        row = session.scalar(select(GroupProtection).where(
+            GroupProtection.protect_date == req.protect_date,
+            GroupProtection.group_id == req.group_id,
+            GroupProtection.user_id == req.user_id,
+        ).with_for_update().execution_options(populate_existing=True))
+        created = row is None
+        old_sources = row.source_levels if row is not None else None
+        legacy = None
+        if row is None:
+            legacy = session.scalar(select(GroupProtection).where(
+                GroupProtection.protect_date == req.protect_date,
+                GroupProtection.group_id == "__all__",
+                GroupProtection.user_id == req.user_id,
+            ).with_for_update().execution_options(populate_existing=True))
+            row = GroupProtection(protect_date=req.protect_date, group_id=req.group_id, user_id=req.user_id,
+                                  base_level=legacy.base_level if legacy else req.level,
+                                  consecutive_days=0, roast_success_count=legacy.roast_success_count if legacy else 0,
+                                  source_levels={"legacy": legacy.base_level} if legacy else {"manual": req.level})
+            session.add(row)
+        if not created or legacy is not None:
+            level = min(5, row.base_level + row.roast_success_count)
+            changed = req.level > level
+            sources = protection_sources(row)
+            # 申请等级是发放后的实际等级，不能再次叠加已有破防升级。
+            sources["manual"] = max(sources.get("manual", 0), max(1, req.level - row.roast_success_count))
+            row.source_levels = sources
+            row.base_level = max(sources.values())
+        else:
+            changed = True
+        session.flush()
+        sync_pending_protection(session, row)
+        result = GrantProtectionResponse(level=min(5, row.base_level + row.roast_success_count), changed=changed)
+        record_key_mutation_outcome(session, identity, operation="POST /v1/protections/grant",
+                                   created_records=int(created),
+                                   updated_records=int(not created and old_sources != row.source_levels),
+                                   idempotent_hits=int(not created and old_sources == row.source_levels))
+        session.commit()
+        return result
+
+    return _run_protection_transaction(session, transaction)
 
 
 @router.get("/check", response_model=ProtectedResponse)
@@ -80,4 +181,6 @@ def check_protected(protect_date: dt.date, group_id: str, user_id: str, session:
     ).scalar_one_or_none()
     return ProtectedResponse(protected=bool(row), base_level=row.base_level if row else 0,
                              level=min(5, row.base_level + row.roast_success_count) if row else 0,
-                             consecutive_days=row.consecutive_days if row else 0)
+                             consecutive_days=row.consecutive_days if row else 0,
+                             source=protection_source(row) if row else "legacy",
+                             daily_base_level=(protection_sources(row).get("daily", row.base_level if row.source_levels is None else 0) if row else 0))

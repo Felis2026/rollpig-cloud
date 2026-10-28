@@ -187,6 +187,7 @@ class GroupProtection(Base):
     group_id: Mapped[str] = mapped_column(String(64), nullable=False)
     user_id: Mapped[str] = mapped_column(String(64), nullable=False)
     roast_success_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    source_levels: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     base_level: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     consecutive_days: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
@@ -232,6 +233,7 @@ class RoastReservation(Base):
     # 进行中的场次占用 1，结束后置空；NULL 允许同日保留多场历史结果。
     active_slot: Mapped[int | None] = mapped_column(Integer, nullable=True, default=1, server_default="1")
     protection_required: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    protection_source: Mapped[str] = mapped_column(String(16), nullable=False, default="legacy", server_default="legacy")
     force_operator_id: Mapped[str] = mapped_column(String(64), nullable=False, default="", server_default="")
     force_operator_name: Mapped[str] = mapped_column(String(128), nullable=False, default="", server_default="")
     force_feed_user_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)

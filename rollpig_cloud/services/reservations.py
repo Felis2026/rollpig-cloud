@@ -15,6 +15,7 @@ from ..schemas import (
     RoastReservationPrepareResponse,
 )
 from .usage import consume_force_usage, consume_roast_usage
+from .protections import protection_source
 from .roast_refills import mark_group_active_users
 
 
@@ -75,6 +76,7 @@ def reservation_to_schema(
         daily_feed_results=reservation.daily_feed_results or [],
         claim_token=reservation.claim_token or "",
         protection_required=reservation.protection_required,
+        protection_source=reservation.protection_source,
         force_operator_id=reservation.force_operator_id,
         force_operator_name=reservation.force_operator_name,
         force_feed_user_ids=reservation.force_feed_user_ids or [],
@@ -260,6 +262,7 @@ def prepare_reservation(
         status="pending",
         protection_required=(1 + min(5, protection.base_level + protection.roast_success_count)
                              if protection is not None and req.supports_protection_gathering else 0),
+        protection_source=protection_source(protection) if protection is not None else "legacy",
     )
     session.add(reservation)
     session.flush()

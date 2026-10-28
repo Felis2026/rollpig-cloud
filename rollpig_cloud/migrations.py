@@ -211,12 +211,14 @@ def _migrate_protection_gatherings(engine: Engine) -> None:
 
     tables = set(inspect(engine).get_table_names())
     if "group_protections" in tables:
+        _add_column_if_missing(engine, "group_protections", "source_levels", "JSON NULL")
         _add_column_if_missing(engine, "group_protections", "roast_success_count", "INTEGER NOT NULL DEFAULT 0")
         _add_column_if_missing(engine, "group_protections", "base_level", "INTEGER NOT NULL DEFAULT 1")
         _add_column_if_missing(engine, "group_protections", "consecutive_days", "INTEGER NOT NULL DEFAULT 1")
     if "roast_reservation_participants" in tables:
         _add_column_if_missing(engine, "roast_reservation_participants", "contribution", "INTEGER NOT NULL DEFAULT 1")
     _add_column_if_missing(engine, "roast_reservations", "protection_required", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(engine, "roast_reservations", "protection_source", "VARCHAR(16) NOT NULL DEFAULT 'legacy'")
     _add_column_if_missing(engine, "roast_reservations", "force_operator_id", "VARCHAR(64) NOT NULL DEFAULT ''")
     _add_column_if_missing(engine, "roast_reservations", "force_operator_name", "VARCHAR(128) NOT NULL DEFAULT ''")
     _add_column_if_missing(engine, "roast_reservations", "force_feed_user_ids", "JSON NULL")
