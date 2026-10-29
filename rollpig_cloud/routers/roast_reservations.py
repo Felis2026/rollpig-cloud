@@ -18,6 +18,7 @@ from ..schemas import (
     RoastReservationCompleteRequest,
     RoastReservationMutationRequest,
     RoastReservationMutationResponse,
+    RoastWaitingNoticeRequest,
     RoastReservationOutcomeRequest,
     RoastReservationOwnedResponse,
     RoastReservationPrepareRequest,
@@ -184,6 +185,7 @@ def prepare(req: RoastReservationPrepareRequest, session: Session = Depends(get_
                     session,
                     date_str=req.date_str,
                     target_id=req.target_id,
+                    notice_handled_id=response.reservation.reservation_id if response.reservation is not None else "",
                 )
                 # 未达标的保护场次也会保存已抽猪状态，通知须读取本次对账后的快照。
                 session.commit()
@@ -274,6 +276,29 @@ def claim(req: RoastReservationClaimRequest, session: Session = Depends(get_sess
     # claim 同时返回 has_owned，使 Owner-only 轮询无需再追加 /owned 请求。被本地
     # 排除的预约仍计入 owned，避免暂缓期间错误停止后续恢复。
     items = [reservation_to_schema(session, row) for row in rows]
+    waiting_notices = []
+    if req.supports_waiting_notice and req.supports_protection_gathering and req.protection_gathering_version >= 2:
+        notice_status = RoastReservation.waiting_notice["status"].as_string()
+        notice_query = select(RoastReservation).where(
+            RoastReservation.delivery_bot_id == req.delivery_bot_id,
+            RoastReservation.date_str == req.date_str,
+            RoastReservation.status == "pending",
+            RoastReservation.target_pig_id != "",
+            RoastReservation.protection_required > 0,
+            (RoastReservation.force_mode.is_(None)) | (RoastReservation.force_mode != "super"),
+            (notice_status == "pending") | (
+                (notice_status == "processing")
+                & (RoastReservation.waiting_notice["claimed_at"].as_string() < stale_before.isoformat())
+            ),
+        ).order_by(RoastReservation.id).limit(max(1, min(12, req.limit))).with_for_update().execution_options(populate_existing=True)
+        if excluded_ids:
+            notice_query = notice_query.where(~RoastReservation.reservation_id.in_(excluded_ids))
+        for row in session.scalars(notice_query).all():
+            token = uuid.uuid4().hex
+            row.waiting_notice = {"status": "processing", "claim_token": token, "claimed_at": now.isoformat()}
+            item = reservation_to_schema(session, row)
+            item.claim_token = token
+            waiting_notices.append(item)
     has_owned = session.execute(
         select(RoastReservation.id).where(
             RoastReservation.delivery_bot_id == req.delivery_bot_id,
@@ -282,7 +307,40 @@ def claim(req: RoastReservationClaimRequest, session: Session = Depends(get_sess
         ).limit(1)
     ).first() is not None
     session.commit()
-    return RoastReservationClaimResponse(items=items, has_owned=has_owned)
+    return RoastReservationClaimResponse(items=items, has_owned=has_owned, waiting_notices=waiting_notices)
+
+
+@router.post("/waiting-notice", response_model=RoastReservationMutationResponse)
+def transition_waiting_notice(req: RoastWaitingNoticeRequest, session: Session = Depends(get_session, scope="function")):
+    """推进等待提示的独立发送状态；已开炉或已换租约的旧提示不能发送。"""
+
+    def transaction():
+        """锁定场次后检查通知 token，避免重复领取和发送状态互相覆盖。"""
+        if session.get_bind().dialect.name == "sqlite":
+            session.execute(update(RoastReservation).where(
+                RoastReservation.reservation_id == req.reservation_id,
+            ).values(protection_required=RoastReservation.protection_required))
+        row = session.scalar(select(RoastReservation).where(
+            RoastReservation.reservation_id == req.reservation_id,
+        ).with_for_update().execution_options(populate_existing=True))
+        notice = dict(row.waiting_notice or {}) if row is not None else {}
+        if (row is None or row.status != "pending" or row.date_str != rollpig_today()
+                or not req.claim_token or notice.get("claim_token") != req.claim_token):
+            return RoastReservationMutationResponse(ok=False)
+        state = notice.get("status")
+        if req.action == "sending" and state in {"processing", "sending"}:
+            notice["status"] = "sending"
+        elif req.action == "sent" and state in {"sending", "sent"}:
+            notice["status"] = "sent"
+        elif req.action == "release" and state == "processing":
+            notice = {"status": "pending"}
+        else:
+            return RoastReservationMutationResponse(ok=False)
+        row.waiting_notice = notice
+        session.commit()
+        return RoastReservationMutationResponse(ok=True)
+
+    return run_transaction_with_sqlite_lock_retry(session, transaction)
 
 
 def _prepare_outcome_once(

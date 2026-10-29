@@ -62,6 +62,7 @@
 ### 升级与运维说明
 
 - **Cloud 0.10.2**：提前归还业务数据库连接，修复访问统计在连接池满时等待新连接、拖住业务响应的问题。统计仍同步保存，接口与数据库表结构保持兼容；运行环境要求 FastAPI 0.121.0 及以上。
+- **保护预约等待提示**：目标抽猪后火力仍不足时登记等待提示，支持的 Plus 客户端负责领取并发送；有人加入或场次开炉后取消旧提示，保护门槛变化时可重新登记。Cloud 启动会为预约表补充可空的 `waiting_notice` JSON 列，需具备补列权限；旧客户端未声明 `supports_waiting_notice` 时不领取新提示，原有预约流程继续兼容。
 - **升级顺序**：跨版本升级时建议**先升级 Cloud，再升级 Plus**。新版 Cloud 向后兼容旧版 Plus 的既有请求与字段；新版 Plus 连接旧版 Cloud 时，基础抽猪与普通烧烤照常运行，仅对旧版 Cloud 尚未支持的新功能（如聚众烤猪、回复通知加入、昨日补签等）提示升级或静默跳过，不会回退本地造成数据分叉。
 - **自动结构迁移与权限要求**：Cloud 启动时会自动执行幂等数据库迁移（创建新表、补齐新增列并调整预约表唯一索引），配置的数据库账号需要具备建表与 `ALTER TABLE`（DDL）权限。
 - **数据备份与回滚**：替换 Cloud 容器或代码不会清除 MySQL 数据，但删除数据库、清理数据卷或更改租户 ID 会影响已有成长记录。正式升级前请先备份数据库；`0.10.0` 将预约表由单日唯一约束调整为同目标进行中场次唯一约束，若需回滚至旧版本服务请先恢复数据库备份。
@@ -270,7 +271,8 @@ docker run -d \
 | `POST` | `/v1/roast-reservations/bind-message` | 幂等绑定 Bot 预约通知消息 ID，重启后仍可定位 |
 | `POST` | `/v1/roast-reservations/join-by-message` | 根据通知免费加入指定预约，校验参与者今日抽取、人数与预约状态 |
 | `GET` | `/v1/roast-reservations/owned` | 查询指定 Bot 当天是否持有未完成预约 |
-| `POST` | `/v1/roast-reservations/claim` | 原子领取可投递预约，并在同一响应返回当前 Bot 是否仍持有未完成预约 |
+| `POST` | `/v1/roast-reservations/claim` | 原子领取可投递预约；支持的客户端同时领取目标已到场但保护火力不足的提示 |
+| `POST` | `/v1/roast-reservations/waiting-notice` | 更新等待提示的发送状态，与开炉结果分开记录 |
 | `POST` | `/v1/roast-reservations/outcome/prepare` | 幂等保存固定结果、结算普通参与者加餐并进入可安全重领的 `prepared` |
 | `POST` | `/v1/roast-reservations/sending` | 幂等提交发送意图；进入后不再自动释放或重领 |
 | `POST` | `/v1/roast-reservations/outcome` | 兼容旧 Plus：保存固定结果并直接进入 `sending` |

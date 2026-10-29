@@ -23,9 +23,10 @@ from rollpig_cloud.db import Base, get_session
 from rollpig_cloud.migrations import ensure_runtime_migrations
 from rollpig_cloud.models import DailyRoll, GroupProtection, RoastReservation, RoastReservationParticipant
 from rollpig_cloud.routers import protections
-from rollpig_cloud.routers.roast_reservations import claim, prepare, prepare_outcome
+from rollpig_cloud.routers import roast_reservations as reservation_router
+from rollpig_cloud.routers.roast_reservations import claim, prepare, prepare_outcome, transition_waiting_notice
 from rollpig_cloud.schemas import (GrantProtectionRequest, ReplaceGroupProtectionsRequest, RoastReservationClaimRequest,
-                                   RoastReservationOutcomeRequest, RoastReservationPrepareRequest)
+                                   RoastReservationOutcomeRequest, RoastReservationPrepareRequest, RoastWaitingNoticeRequest)
 from rollpig_cloud.services.reservations import activate_target_reservations
 
 
@@ -81,6 +82,137 @@ class ManualProtectionTests(unittest.TestCase):
             self.assertFalse(protections.check_protected(date, group, "2", self.session).protected)
         self.assertEqual(self.row().source_levels, {"manual": 5})
         self.assertEqual(self.row().consecutive_days, 0)
+
+    def claim_notices(self, **changes):
+        """模拟支持等待提示的客户端领取，与实际开炉结果使用同一请求。"""
+        values = dict(delivery_bot_id="bot", date_str=DATE, supports_protection_gathering=True,
+                      protection_gathering_version=2, supports_waiting_notice=True, supports_prepared=True)
+        values.update(changes)
+        return claim(RoastReservationClaimRequest(**values), self.session)
+
+    def notice_action(self, item, action):
+        """按实际通知 token 推进状态，固定测试业务日期。"""
+        with patch.object(reservation_router, "rollpig_today", return_value=DATE):
+            return transition_waiting_notice(RoastWaitingNoticeRequest(
+                reservation_id=item.reservation_id, claim_token=item.claim_token, action=action,
+            ), self.session).ok
+
+    def test_waiting_notice_arrival_claim_and_idempotent_send_do_not_open_round(self):
+        self.prepare()
+        self.grant(1)
+        self.arrive_target()
+        item, = self.claim_notices().waiting_notices
+        self.assertEqual((item.status, item.protection_required, len(item.participants)), ("pending", 2, 1))
+        self.assertFalse(self.claim_notices().waiting_notices)
+        self.assertTrue(self.notice_action(item, "sending"))
+        self.assertTrue(self.notice_action(item, "sending"))
+        self.assertFalse(self.notice_action(item, "release"))
+        self.assertTrue(self.notice_action(item, "sent"))
+        self.assertTrue(self.notice_action(item, "sent"))
+        self.assertFalse(self.claim_notices().waiting_notices)
+        activate_target_reservations(self.session, date_str=DATE, target_id="2", target_pig_id="pig")
+        self.session.commit()
+        self.assertFalse(self.claim_notices().waiting_notices)
+        row = self.session.scalar(select(RoastReservation))
+        self.assertEqual(row.status, "pending")
+        self.assertIsNone(row.outcome_snapshot)
+
+    def test_waiting_notice_presend_release_reclaim_and_old_token_rejection(self):
+        self.grant()
+        self.prepare()
+        self.arrive_target()
+        first, = self.claim_notices().waiting_notices
+        self.assertTrue(self.notice_action(first, "release"))
+        second, = self.claim_notices().waiting_notices
+        self.assertNotEqual(first.claim_token, second.claim_token)
+        self.assertFalse(self.notice_action(first, "sending"))
+        row = self.session.scalar(select(RoastReservation))
+        notice = dict(row.waiting_notice)
+        notice["claimed_at"] = "2000-01-01T00:00:00"
+        row.waiting_notice = notice
+        self.session.commit()
+        third, = self.claim_notices().waiting_notices
+        self.assertNotEqual(second.claim_token, third.claim_token)
+        self.assertTrue(self.notice_action(third, "sending"))
+        notice = dict(row.waiting_notice)
+        notice["claimed_at"] = "2000-01-01T00:00:00"
+        row.waiting_notice = notice
+        self.session.commit()
+        self.assertFalse(self.claim_notices().waiting_notices)
+
+    def test_waiting_notice_is_owner_capability_and_exclusion_scoped(self):
+        self.grant()
+        self.prepare()
+        self.arrive_target()
+        row = self.session.scalar(select(RoastReservation))
+        for changes in ({"delivery_bot_id": "other"}, {"supports_waiting_notice": False},
+                        {"supports_protection_gathering": False}, {"excluded_reservation_ids": [row.reservation_id]}):
+            self.assertFalse(self.claim_notices(**changes).waiting_notices)
+        self.assertEqual(len(self.claim_notices().waiting_notices), 1)
+
+    def test_direct_protected_prepare_does_not_queue_duplicate_notice(self):
+        self.grant()
+        self.arrive_target()
+        self.assertEqual(self.prepare().reservation.status, "pending")
+        self.assertFalse(self.claim_notices().waiting_notices)
+
+    def test_join_or_ignition_cancels_old_waiting_notice(self):
+        self.grant(2)
+        self.prepare()
+        self.arrive_target()
+        item, = self.claim_notices().waiting_notices
+        self.prepare("4")
+        self.assertFalse(self.notice_action(item, "sending"))
+        self.assertFalse(self.claim_notices().waiting_notices)
+        self.prepare("5")
+        result = self.claim_notices()
+        self.assertEqual(len(result.items), 1)
+        self.assertFalse(result.waiting_notices)
+
+    def test_protection_raise_requeues_notice_but_equal_grant_does_not(self):
+        self.grant(1)
+        self.prepare()
+        self.arrive_target()
+        first, = self.claim_notices().waiting_notices
+        self.notice_action(first, "sending")
+        self.notice_action(first, "sent")
+        self.grant(1)
+        self.assertFalse(self.claim_notices().waiting_notices)
+        self.grant(3)
+        second, = self.claim_notices().waiting_notices
+        self.assertEqual(second.protection_required, 4)
+        self.assertNotEqual(first.claim_token, second.claim_token)
+
+    def test_post_commit_reconcile_saves_arrival_even_without_ignition(self):
+        from rollpig_cloud.routers.daily_rolls import _reconcile_reservations_after_commit
+
+        self.grant()
+        self.prepare()
+        self.session.add(DailyRoll(date_str=DATE, user_id="2", pig_id="pig"))
+        self.session.commit()
+        _reconcile_reservations_after_commit(self.session, date_str=DATE, user_id="2", pig_id="pig")
+        self.session.close()
+        with Session(self.engine) as fresh:
+            row = fresh.scalar(select(RoastReservation))
+            self.assertEqual((row.status, row.target_pig_id, row.waiting_notice), ("pending", "pig", {"status": "pending"}))
+
+    def test_prepare_reconcile_does_not_duplicate_direct_progress_or_suppress_other_groups(self):
+        self.grant()
+        self.prepare()
+        self.grant(group_id="200")
+        original = reservation_router.prepare_reservation
+
+        def arrive_after_prepare(session, req):
+            """模拟目标记录在预约首次读取后才出现，迫使提交后对账补齐到场状态。"""
+            response = original(session, req)
+            session.add(DailyRoll(date_str=DATE, user_id="2", pig_id="pig"))
+            return response
+
+        with patch.object(reservation_router, "prepare_reservation", side_effect=arrive_after_prepare):
+            response = self.prepare(group_id="200")
+        self.assertEqual((response.reservation.target_pig_id, response.reservation.status), ("pig", "pending"))
+        notices = self.claim_notices().waiting_notices
+        self.assertEqual([item.group_id for item in notices], ["100"])
 
     def test_daily_replacement_preserves_manual_and_does_not_use_manual_streak(self):
         self.grant(5)
@@ -528,6 +660,42 @@ class ManualProtectionMigrationTests(unittest.TestCase):
 
 
 class ConcurrentManualProtectionTests(unittest.TestCase):
+    def test_same_owner_instances_only_claim_waiting_notice_once(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            engine = create_engine(f"sqlite+pysqlite:///{Path(temporary) / 'notice.sqlite3'}")
+            Base.metadata.create_all(engine)
+            try:
+                with Session(engine) as session:
+                    session.add(RoastReservation(
+                        reservation_id="notice", date_str=DATE, group_id="100", target_id="2", target_pig_id="pig",
+                        owner_id="3", owner_pig_id="pig", delivery_bot_id="bot", status="pending",
+                        protection_required=2, waiting_notice={"status": "pending"},
+                    ))
+                    session.commit()
+
+                def take(_):
+                    """由独立连接模拟同一 Bot 在多个进程中的轮询。"""
+                    with Session(engine, autoflush=False, expire_on_commit=False) as session:
+                        return len(claim(RoastReservationClaimRequest(
+                            delivery_bot_id="bot", date_str=DATE, supports_waiting_notice=True,
+                            supports_protection_gathering=True, protection_gathering_version=2,
+                        ), session).waiting_notices)
+
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    self.assertEqual(sum(pool.map(take, range(2))), 1)
+            finally:
+                engine.dispose()
+
+    def test_existing_schema_adds_notice_column_idempotently(self):
+        engine = create_engine("sqlite+pysqlite:///:memory:")
+        self.addCleanup(engine.dispose)
+        Base.metadata.create_all(engine)
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE roast_reservations DROP COLUMN waiting_notice"))
+        ensure_runtime_migrations(engine)
+        ensure_runtime_migrations(engine)
+        self.assertIn("waiting_notice", {item["name"] for item in inspect(engine).get_columns("roast_reservations")})
+
     def test_grant_and_daily_replacement_preserve_manual_protection(self):
         with tempfile.TemporaryDirectory() as temporary:
             engine = create_engine(f"sqlite+pysqlite:///{Path(temporary) / 'cloud.sqlite3'}")

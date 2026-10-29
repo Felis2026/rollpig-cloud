@@ -75,13 +75,14 @@ def _reconcile_reservations_after_commit(
 ) -> None:
     """提交 DailyRoll 后再次幂等对账，封住预约与抽猪并发提交的交错窗口。"""
 
-    if activate_target_reservations(
+    activate_target_reservations(
         session,
         date_str=date_str,
         target_id=user_id,
         target_pig_id=pig_id,
-    ):
-        session.commit()
+    )
+    # 未达标时也会保存到场形态与等待提示，不能只在切换 ready 后提交。
+    session.commit()
 
 
 @router.post("/get-or-create", response_model=DailyRollLookupResponse)
