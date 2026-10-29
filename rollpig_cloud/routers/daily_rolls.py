@@ -32,7 +32,7 @@ router = APIRouter(prefix="/v1/daily-rolls", tags=["daily-rolls"], dependencies=
 def _retry_roll_conflicts(handler):
     """跨日期成长竞争时回滚整笔事务重试，最多三次，不吞掉其他数据库错误。"""
     @wraps(handler)
-    def wrapped(req, session=Depends(get_session), identity=Depends(verify_token)):
+    def wrapped(req, session=Depends(get_session, scope="function"), identity=Depends(verify_token)):
         for attempt in range(3):
             try:
                 return handler(req, session, identity)
@@ -88,7 +88,7 @@ def _reconcile_reservations_after_commit(
 @_retry_roll_conflicts
 def get_or_create_daily_roll(
     req: DailyRollGetOrCreateRequest,
-    session: Session = Depends(get_session),
+    session: Session = Depends(get_session, scope="function"),
     identity: ApiKeyIdentity = Depends(verify_token),
 ):
     existing = session.execute(
@@ -185,7 +185,7 @@ def get_or_create_daily_roll(
 @_retry_roll_conflicts
 def makeup_daily_roll(
     req: DailyRollGetOrCreateRequest,
-    session: Session = Depends(get_session),
+    session: Session = Depends(get_session, scope="function"),
     identity: ApiKeyIdentity = Depends(verify_token),
 ):
     """只补昨天的收藏成长；唯一抽取行先占位，不登记群活动或触发预约。"""
@@ -234,7 +234,7 @@ def makeup_daily_roll(
 
 
 @router.get("/by-date", response_model=DailyRollLookupResponse)
-def get_daily_roll_by_date(user_id: str, date_str: dt.date, session: Session = Depends(get_session)):
+def get_daily_roll_by_date(user_id: str, date_str: dt.date, session: Session = Depends(get_session, scope="function")):
     existing = session.execute(
         select(DailyRoll).where(DailyRoll.user_id == user_id, DailyRoll.date_str == date_str)
     ).scalar_one_or_none()
@@ -260,7 +260,7 @@ def _snapshot_payload(req: DailyRollSnapshotRequest) -> dict:
 @router.put("/snapshot", response_model=DailyRollSnapshotUpdateResponse)
 def complete_daily_roll_snapshot(
     req: DailyRollSnapshotRequest,
-    session: Session = Depends(get_session),
+    session: Session = Depends(get_session, scope="function"),
     identity: ApiKeyIdentity = Depends(verify_token),
 ):
     """幂等保存抽取客户端当时实际解析出的资源与 EX 差分结果。"""
@@ -329,6 +329,6 @@ def complete_daily_roll_snapshot(
 
 
 @router.get("/all", response_model=DailyRollListResponse)
-def get_daily_rolls(date_str: dt.date, session: Session = Depends(get_session)):
+def get_daily_rolls(date_str: dt.date, session: Session = Depends(get_session, scope="function")):
     rows = session.execute(select(DailyRoll).where(DailyRoll.date_str == date_str)).scalars().all()
     return DailyRollListResponse(items=[DailyRollItem(user_id=row.user_id, pig_id=row.pig_id) for row in rows])

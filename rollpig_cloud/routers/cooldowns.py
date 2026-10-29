@@ -13,7 +13,7 @@ router = APIRouter(prefix="/v1/cooldowns", tags=["cooldowns"], dependencies=[Dep
 
 
 @router.post("/consume-roast", response_model=ConsumeRoastResponse)
-def consume_roast(req: ConsumeRoastRequest, session: Session = Depends(get_session)):
+def consume_roast(req: ConsumeRoastRequest, session: Session = Depends(get_session, scope="function")):
     # ================================ 整数秒时间戳归一化 ================================ #
     # MySQL FLOAT 在保存 10 位 Unix 时间戳时会发生精度丢失，进一步导致
     # SQLAlchemy 读回来的值偏大，最终把 8h CD 算成 9h+。
@@ -37,7 +37,7 @@ def consume_roast(req: ConsumeRoastRequest, session: Session = Depends(get_sessi
 
 
 @router.post("/consume-force", response_model=SimpleAllowedResponse)
-def consume_force(req: ConsumeForceRequest, session: Session = Depends(get_session)):
+def consume_force(req: ConsumeForceRequest, session: Session = Depends(get_session, scope="function")):
     for _ in range(2):
         try:
             allowed = consume_force_usage(session, user_id=req.user_id, date_str=req.date_str)

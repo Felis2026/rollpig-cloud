@@ -20,7 +20,7 @@ router = APIRouter(prefix="/v1/group-rolls", tags=["group-rolls"], dependencies=
 @router.post("/mark-seen")
 def mark_seen(
     req: GroupRollMarkSeenRequest,
-    session: Session = Depends(get_session),
+    session: Session = Depends(get_session, scope="function"),
     identity: ApiKeyIdentity = Depends(verify_token),
 ):
     existing = session.execute(
@@ -55,7 +55,7 @@ def mark_seen(
 def get_group_rolls(
     group_id: str,
     date_str: dt.date,
-    session: Session = Depends(get_session),
+    session: Session = Depends(get_session, scope="function"),
     cutoff_at: dt.datetime | None = None,
 ):
     stmt = select(GroupRoll).where(

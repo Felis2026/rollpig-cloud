@@ -42,7 +42,7 @@ router = APIRouter(
 # ================================ 群日活 ================================ #
 
 @router.post("/active-users/mark", response_model=SimpleAllowedResponse)
-def mark_active_users(req: GroupActiveUsersMarkRequest, session: Session = Depends(get_session)):
+def mark_active_users(req: GroupActiveUsersMarkRequest, session: Session = Depends(get_session, scope="function")):
     mark_group_active_users(
         session,
         date_str=req.date_str,
@@ -57,7 +57,7 @@ def mark_active_users(req: GroupActiveUsersMarkRequest, session: Session = Depen
 def list_active_users(
     group_id: str,
     date_str: dt.date,
-    session: Session = Depends(get_session),
+    session: Session = Depends(get_session, scope="function"),
     cutoff_at: dt.datetime | None = None,
 ):
     return GroupActiveUsersResponse(
@@ -73,7 +73,7 @@ def list_active_users(
 # ================================ 申请生命周期 ================================ #
 
 @router.post("/prepare", response_model=GroupRoastRefillPrepareResponse)
-def prepare(req: GroupRoastRefillPrepareRequest, session: Session = Depends(get_session)):
+def prepare(req: GroupRoastRefillPrepareRequest, session: Session = Depends(get_session, scope="function")):
     # 无行可锁时由 active_key 唯一键裁决；冲突实例回滚后重查已存在申请。
     for _ in range(3):
         try:
@@ -86,7 +86,7 @@ def prepare(req: GroupRoastRefillPrepareRequest, session: Session = Depends(get_
 
 
 @router.post("/bind-message", response_model=GroupRoastRefillLookupResponse)
-def bind_message(req: GroupRoastRefillBindRequest, session: Session = Depends(get_session)):
+def bind_message(req: GroupRoastRefillBindRequest, session: Session = Depends(get_session, scope="function")):
     row = bind_refill_message(
         session,
         request_id=req.request_id,
@@ -101,7 +101,7 @@ def get_active(
     group_id: str,
     date_str: dt.date,
     now_ts: float | None = None,
-    session: Session = Depends(get_session),
+    session: Session = Depends(get_session, scope="function"),
 ):
     row = get_active_refill(
         session,
@@ -114,7 +114,7 @@ def get_active(
 
 
 @router.post("/fail", response_model=SimpleAllowedResponse)
-def fail(req: GroupRoastRefillFailRequest, session: Session = Depends(get_session)):
+def fail(req: GroupRoastRefillFailRequest, session: Session = Depends(get_session, scope="function")):
     changed = fail_refill(
         session,
         request_id=req.request_id,
@@ -126,7 +126,7 @@ def fail(req: GroupRoastRefillFailRequest, session: Session = Depends(get_sessio
 
 
 @router.post("/complete", response_model=GroupRoastRefillCompleteResponse)
-def complete(req: GroupRoastRefillCompleteRequest, session: Session = Depends(get_session)):
+def complete(req: GroupRoastRefillCompleteRequest, session: Session = Depends(get_session, scope="function")):
     response = complete_refill(
         session,
         request_id=req.request_id,

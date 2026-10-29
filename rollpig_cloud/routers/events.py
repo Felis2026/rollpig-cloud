@@ -62,7 +62,7 @@ def _create_event_once(
 @router.post("", response_model=EventCreateResponse)
 def create_event(
     req: EventCreateRequest,
-    session: Session = Depends(get_session),
+    session: Session = Depends(get_session, scope="function"),
     identity: ApiKeyIdentity = Depends(verify_token),
 ):
     # 日期在重试前只解析一次，事件、群活跃和加餐始终落在同一业务日。
@@ -77,7 +77,7 @@ def create_event(
 def list_events(
     date_str: dt.date,
     group_id: str | None = None,
-    session: Session = Depends(get_session),
+    session: Session = Depends(get_session, scope="function"),
     user_id: str | None = None,
     cutoff_at: dt.datetime | None = None,
 ):

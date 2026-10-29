@@ -8,7 +8,7 @@
 
   <p>
     <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="Python >= 3.10">
-    <img src="https://img.shields.io/badge/FastAPI-0.110%2B-009688" alt="FastAPI >= 0.110">
+    <img src="https://img.shields.io/badge/FastAPI-0.121%2B-009688" alt="FastAPI >= 0.121">
     <img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License">
   </p>
 </div>
@@ -61,6 +61,7 @@
 
 ### 升级与运维说明
 
+- **Cloud 0.10.2**：提前归还业务数据库连接，修复访问统计在连接池满时等待新连接、拖住业务响应的问题。统计仍同步保存，接口与数据库表结构保持兼容；运行环境要求 FastAPI 0.121.0 及以上。
 - **升级顺序**：跨版本升级时建议**先升级 Cloud，再升级 Plus**。新版 Cloud 向后兼容旧版 Plus 的既有请求与字段；新版 Plus 连接旧版 Cloud 时，基础抽猪与普通烧烤照常运行，仅对旧版 Cloud 尚未支持的新功能（如聚众烤猪、回复通知加入、昨日补签等）提示升级或静默跳过，不会回退本地造成数据分叉。
 - **自动结构迁移与权限要求**：Cloud 启动时会自动执行幂等数据库迁移（创建新表、补齐新增列并调整预约表唯一索引），配置的数据库账号需要具备建表与 `ALTER TABLE`（DDL）权限。
 - **数据备份与回滚**：替换 Cloud 容器或代码不会清除 MySQL 数据，但删除数据库、清理数据卷或更改租户 ID 会影响已有成长记录。正式升级前请先备份数据库；`0.10.0` 将预约表由单日唯一约束调整为同目标进行中场次唯一约束，若需回滚至旧版本服务请先恢复数据库备份。
@@ -91,6 +92,10 @@ ROLLPIG_CLOUD_KEYS_JSON={"nekobot-v2":"实际Token1","shenyang-v1":"实际Token2
 Key 名称可以修改；Cloud 使用 Token 的不可逆指纹关联统计，更名不会拆分历史数据。旧的 `ROLLPIG_CLOUD_TOKENS` 继续兼容，未命名 Token 会以 `key-xxxxxxxxxxxxxxxx` 显示。两个变量可以同时使用，同一个 Token 出现在两处时优先采用具名配置。
 
 Cloud 会把已鉴权请求按上海业务日期、Key 和路由累计到 `source_key_daily_usage`。其中 `successful_mutations` 表示成功的 `POST`、`PUT`、`PATCH`、`DELETE` 请求数，不等同于接口一次批量写入的数据库行数；每日抽取、外观快照、烤猪事件、群抽取记录和保护名单接口还会分别累计真实的新增、更新、删除与幂等命中数量。统计从启用该版本后开始，无法反推历史 Token 来源。日志只包含 Key 指纹和名称，不包含原始 Token、用户 ID 或查询参数。
+
+业务数据库会话使用 FastAPI 的函数级依赖作用域，在响应数据生成后先归还连接，再同步提交访问统计。这样连接池满时，读请求不会占着业务连接等待统计申请另一条连接。访问计数、业务写入结果和幂等计数均保留，未引入后台队列或延迟汇总；依赖要求 FastAPI 0.121.0 及以上，生产依赖锁已满足。
+
+访问耗时日志包含业务处理及会话清理耗时 `business_duration_ms`、统计事务耗时 `usage_duration_ms` 和两者合计 `duration_ms`，不包含后续响应体传输或外部网络耗时。合计达到一秒时使用警告级别，方便在默认日志配置下区分业务查询与统计等待。
 
 按 Key 汇总写入结果可以执行：
 

@@ -19,7 +19,7 @@ router = APIRouter(prefix="/v1/catalog-snapshot", tags=["catalog"], dependencies
 
 
 @router.get("", response_model=CatalogSnapshotResponse)
-def get_catalog_snapshot(user_id: str, days: int = 14, session: Session = Depends(get_session)):
+def get_catalog_snapshot(user_id: str, days: int = 14, session: Session = Depends(get_session, scope="function")):
     """返回图鉴渲染所需的只读聚合数据，避免 bot 端为一张图重复打多个接口。"""
     safe_days = max(1, min(60, int(days or 14)))
     today = rollpig_today()

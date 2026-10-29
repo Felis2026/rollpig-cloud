@@ -51,7 +51,7 @@ def capabilities():
 
 
 @router.post("/bind-message")
-def bind_message(req: RoastReservationBindMessageRequest, session: Session = Depends(get_session)):
+def bind_message(req: RoastReservationBindMessageRequest, session: Session = Depends(get_session, scope="function")):
     """持久化通知关联；重试幂等，同一消息不可指向另一场预约。"""
 
     def transaction():
@@ -87,7 +87,7 @@ def bind_message(req: RoastReservationBindMessageRequest, session: Session = Dep
 
 
 @router.post("/join-by-message", response_model=RoastReservationPrepareResponse)
-def join_by_message(req: RoastReservationReplyJoinRequest, session: Session = Depends(get_session)):
+def join_by_message(req: RoastReservationReplyJoinRequest, session: Session = Depends(get_session, scope="function")):
     """按通知加入既有预约，用户今日小猪由账本读取，不信任客户端伪造。"""
 
     def transaction():
@@ -150,7 +150,7 @@ def join_by_message(req: RoastReservationReplyJoinRequest, session: Session = De
 
 
 @router.post("/unrolled-attempt", response_model=UnrolledRoastAttemptResponse)
-def record_unrolled_attempt(req: UnrolledRoastAttemptRequest, session: Session = Depends(get_session)):
+def record_unrolled_attempt(req: UnrolledRoastAttemptRequest, session: Session = Depends(get_session, scope="function")):
     for _ in range(2):
         row = session.execute(
             select(UnrolledRoastAttempt)
@@ -171,7 +171,7 @@ def record_unrolled_attempt(req: UnrolledRoastAttemptRequest, session: Session =
 
 
 @router.post("/prepare", response_model=RoastReservationPrepareResponse)
-def prepare(req: RoastReservationPrepareRequest, session: Session = Depends(get_session)):
+def prepare(req: RoastReservationPrepareRequest, session: Session = Depends(get_session, scope="function")):
     # 唯一键冲突时整个事务（包括充能消费）一起回滚，再按“加入已有预约”重试。
     for _ in range(2):
         try:
@@ -199,7 +199,7 @@ def prepare(req: RoastReservationPrepareRequest, session: Session = Depends(get_
 
 
 @router.get("/owned", response_model=RoastReservationOwnedResponse)
-def owned(delivery_bot_id: str, date_str: dt.date, session: Session = Depends(get_session)):
+def owned(delivery_bot_id: str, date_str: dt.date, session: Session = Depends(get_session, scope="function")):
     exists = session.execute(
         select(RoastReservation.id).where(
             RoastReservation.delivery_bot_id == delivery_bot_id,
@@ -211,7 +211,7 @@ def owned(delivery_bot_id: str, date_str: dt.date, session: Session = Depends(ge
 
 
 @router.post("/claim", response_model=RoastReservationClaimResponse)
-def claim(req: RoastReservationClaimRequest, session: Session = Depends(get_session)):
+def claim(req: RoastReservationClaimRequest, session: Session = Depends(get_session, scope="function")):
     # ================================ 兼容领取与本地退避 ================================ #
     # 新 Plus 可以安全处理 prepared；旧 Plus 缺少 capability，只能收到它认识的
     # processing/sending。排除列表只用于跳过本机暂缓项，不改变 Cloud 持久状态。
@@ -367,7 +367,7 @@ def _prepare_outcome_once(
 
 
 @router.post("/outcome/prepare", response_model=RoastReservationMutationResponse)
-def prepare_outcome(req: RoastReservationOutcomeRequest, session: Session = Depends(get_session)):
+def prepare_outcome(req: RoastReservationOutcomeRequest, session: Session = Depends(get_session, scope="function")):
     """SQLite 锁冲突时重跑完整结果结算，确保快照与加餐同时成功或同时回滚。"""
 
     return run_transaction_with_sqlite_lock_retry(
@@ -377,7 +377,7 @@ def prepare_outcome(req: RoastReservationOutcomeRequest, session: Session = Depe
 
 
 @router.post("/outcome", response_model=RoastReservationMutationResponse)
-def save_outcome(req: RoastReservationOutcomeRequest, session: Session = Depends(get_session)):
+def save_outcome(req: RoastReservationOutcomeRequest, session: Session = Depends(get_session, scope="function")):
     """兼容旧客户端：旧流程保存结果后会立刻发送，因此仍原子进入 sending。"""
 
     row = session.execute(
@@ -398,7 +398,7 @@ def save_outcome(req: RoastReservationOutcomeRequest, session: Session = Depends
 
 
 @router.post("/sending", response_model=RoastReservationMutationResponse)
-def mark_sending(req: RoastReservationMutationRequest, session: Session = Depends(get_session)):
+def mark_sending(req: RoastReservationMutationRequest, session: Session = Depends(get_session, scope="function")):
     """最终消息准备完成后进入不可回收状态；必须已有固定结果快照。"""
 
     row = session.execute(
@@ -418,7 +418,7 @@ def mark_sending(req: RoastReservationMutationRequest, session: Session = Depend
 
 
 @router.post("/complete", response_model=RoastReservationMutationResponse)
-def complete(req: RoastReservationCompleteRequest, session: Session = Depends(get_session)):
+def complete(req: RoastReservationCompleteRequest, session: Session = Depends(get_session, scope="function")):
     """幂等完成预约，并在提供事件时与完成状态一起原子提交。"""
 
     row = session.execute(
@@ -453,7 +453,7 @@ def complete(req: RoastReservationCompleteRequest, session: Session = Depends(ge
 
 
 @router.post("/release", response_model=RoastReservationMutationResponse)
-def release(req: RoastReservationMutationRequest, session: Session = Depends(get_session)):
+def release(req: RoastReservationMutationRequest, session: Session = Depends(get_session, scope="function")):
     row = session.execute(
         select(RoastReservation).where(RoastReservation.reservation_id == req.reservation_id).with_for_update()
     ).scalar_one_or_none()
