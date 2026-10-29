@@ -13,7 +13,7 @@ router = APIRouter(prefix="/v1/collections", tags=["collections"], dependencies=
 
 
 @router.get("", response_model=CollectionResponse)
-def get_collection(user_id: str, session: Session = Depends(get_session)):
+def get_collection(user_id: str, session: Session = Depends(get_session, scope="function")):
     rows = session.execute(select(Collection).where(Collection.user_id == user_id)).scalars().all()
     pig_ids = sorted({row.pig_id for row in rows})
     return CollectionResponse(pig_ids=pig_ids)

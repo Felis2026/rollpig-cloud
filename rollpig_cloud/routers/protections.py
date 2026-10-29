@@ -36,7 +36,7 @@ def _run_protection_transaction(session: Session, transaction):
 @router.post("/replace-group")
 def replace_group(
     req: ReplaceGroupProtectionsRequest,
-    session: Session = Depends(get_session),
+    session: Session = Depends(get_session, scope="function"),
     identity: ApiKeyIdentity = Depends(verify_token),
 ):
     """替换群保护名单并保留已有保护等级。
@@ -150,7 +150,7 @@ def replace_group(
 @router.post("/grant", response_model=GrantProtectionResponse)
 def grant_protection(
     req: GrantProtectionRequest,
-    session: Session = Depends(get_session),
+    session: Session = Depends(get_session, scope="function"),
     identity: ApiKeyIdentity = Depends(verify_token),
 ):
     """为单个群友发放当日保护；重复请求与低等级请求保持现有权益。"""
@@ -209,7 +209,7 @@ def grant_protection(
 
 
 @router.get("/check", response_model=ProtectedResponse)
-def check_protected(protect_date: dt.date, group_id: str, user_id: str, session: Session = Depends(get_session)):
+def check_protected(protect_date: dt.date, group_id: str, user_id: str, session: Session = Depends(get_session, scope="function")):
     row = session.execute(
         select(GroupProtection).where(
             GroupProtection.protect_date == protect_date,

@@ -47,15 +47,7 @@ async def _record_authenticated_request(request: Request, status_code: int, star
     if identity is None:
         return
     operation = _request_operation(request)
-    payload = {
-        "event": "authenticated_request",
-        "key_id": identity.key_id,
-        "key_name": identity.name,
-        "operation": operation,
-        "status": status_code,
-        "duration_ms": round((time.perf_counter() - started_at) * 1000, 2),
-    }
-    logger.info("rollpig_cloud_access %s", json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+    business_finished_at = time.perf_counter()
     try:
         await asyncio.to_thread(
             record_key_request,
@@ -67,6 +59,21 @@ async def _record_authenticated_request(request: Request, status_code: int, star
     except Exception:
         # 使用统计是旁路能力；数据库统计故障不能把已成功的业务响应改成 500。
         logger.exception("failed to record source key usage: key_id=%s operation=%s", identity.key_id, operation)
+    finally:
+        finished_at = time.perf_counter()
+        payload = {
+            "event": "authenticated_request",
+            "key_id": identity.key_id,
+            "key_name": identity.name,
+            "operation": operation,
+            "status": status_code,
+            "duration_ms": round((finished_at - started_at) * 1000, 2),
+            "business_duration_ms": round((business_finished_at - started_at) * 1000, 2),
+            "usage_duration_ms": round((finished_at - business_finished_at) * 1000, 2),
+        }
+        # 超过一秒的请求使用警告级别，默认 Uvicorn 配置下也能看到超时前兆。
+        level = logging.WARNING if finished_at - started_at >= 1.0 else logging.INFO
+        logger.log(level, "rollpig_cloud_access %s", json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
 
 
 @app.middleware("http")

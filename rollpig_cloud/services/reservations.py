@@ -211,6 +211,7 @@ def prepare_reservation(
         upgrading = participant is not None and boosted
         if participant and not (boosted and participant.contribution < 2) and req.force_mode != "super":
             _update_delivery_capability(reservation, req)
+            reservation.waiting_notice = None
             return RoastReservationPrepareResponse(
                 status="already_joined",
                 reservation=reservation_to_schema(session, reservation, participants=members),
@@ -243,11 +244,13 @@ def prepare_reservation(
             group_id=req.group_id,
             user_ids=[req.attacker_id],
         )
+        # 加入指令直接回复进度，取消尚未发送的后台等待提示。
+        reservation.waiting_notice = None
         session.flush()
         # 抽猪事务可能在通知快照建立后到场，锁定场次中保存的形态优先于旧抽取视图。
         arrived_pig_id = reservation.target_pig_id or (target_roll.pig_id if target_roll else "")
         if arrived_pig_id:
-            _activate_reservation(session, reservation, arrived_pig_id)
+            _activate_reservation(session, reservation, arrived_pig_id, notify_waiting=False)
         return RoastReservationPrepareResponse(
             status="reservation_upgraded" if upgrading else "reservation_joined",
             reservation=reservation_to_schema(session, reservation, participants=members),
@@ -313,7 +316,7 @@ def prepare_reservation(
     )
     session.flush()
     if target_roll is not None:
-        _activate_reservation(session, reservation, target_roll.pig_id)
+        _activate_reservation(session, reservation, target_roll.pig_id, notify_waiting=False)
     return RoastReservationPrepareResponse(
         status="reservation_created",
         reservation=reservation_to_schema(session, reservation),
@@ -322,14 +325,20 @@ def prepare_reservation(
     )
 
 
-def _activate_reservation(session: Session, reservation: RoastReservation, target_pig_id: str) -> bool:
-    """目标已到场时检查集结条件，达标后冻结名单并进入待领取状态。"""
+def _activate_reservation(
+    session: Session, reservation: RoastReservation, target_pig_id: str, *, notify_waiting: bool = True,
+) -> bool:
+    """目标到场后激活场次；未达标时登记提示，直接回复进度的入口传入 notify_waiting=False。"""
 
+    first_arrival = not reservation.target_pig_id
     reservation.target_pig_id = target_pig_id
     participants = _locked_participants(session, reservation.reservation_id)
     if reservation.protection_required and reservation.force_mode != "super":
         if sum(item.contribution for item in participants) < reservation.protection_required:
+            if first_arrival and notify_waiting:
+                reservation.waiting_notice = {"status": "pending"}
             return False
+    reservation.waiting_notice = None
     reservation.status = "ready"
     reservation.ready_at = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
     return True
@@ -341,8 +350,9 @@ def activate_target_reservations(
     date_str: dt.date,
     target_id: str,
     target_pig_id: str,
+    notice_handled_id: str = "",
 ) -> int:
-    """把目标当天所有 pending 预约原子切换为 ready；重复调用保持幂等。"""
+    """对账目标各群预约并返回开炉数，notice_handled_id 对应指令已直接回复进度的场次。"""
 
     # 在状态转换入口再守一次，覆盖抽取侧对账和直接调用者。
     target_roll = session.execute(
@@ -362,7 +372,10 @@ def activate_target_reservations(
     ).scalars().all()
     activated = 0
     for reservation in reservations:
-        activated += int(_activate_reservation(session, reservation, target_pig_id))
+        handled = reservation.reservation_id == notice_handled_id
+        activated += int(_activate_reservation(session, reservation, target_pig_id, notify_waiting=not handled))
+        if handled:
+            reservation.waiting_notice = None
     return activated
 
 
@@ -371,6 +384,7 @@ def activate_if_target_already_rolled(
     *,
     date_str: dt.date,
     target_id: str,
+    notice_handled_id: str = "",
 ) -> int:
     """预约提交后做一次对账，封住“DailyRoll 先提交、预约后提交”的竞态窗口。"""
 
@@ -384,4 +398,5 @@ def activate_if_target_already_rolled(
         date_str=date_str,
         target_id=target_id,
         target_pig_id=target_roll.pig_id,
+        notice_handled_id=notice_handled_id,
     )

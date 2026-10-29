@@ -77,6 +77,12 @@ def run_transaction_with_sqlite_lock_retry(
 
 
 def get_session():
+    """提供业务会话，并在路由生成响应后归还连接。
+
+    路由必须以 scope="function" 注入。请求统计中间件会另开事务，
+    提前归还业务连接可避免连接池满时占着旧连接等待新连接。
+    """
+
     session = SessionLocal()
     try:
         yield session

@@ -66,6 +66,7 @@ def sync_pending_protection(session: Session, row: GroupProtection, *, removed: 
             ).with_for_update().execution_options(populate_existing=True))
             if owner is not None:
                 owner.contribution = 2
+        previous_required = reservation.protection_required
         reservation.protection_required = 0 if removed else 1 + protection_level(row)
         reservation.protection_source = "legacy" if removed else protection_source(row)
         if reservation.target_pig_id:
@@ -74,3 +75,5 @@ def sync_pending_protection(session: Session, row: GroupProtection, *, removed: 
             # 激活会重新读取参与者，先保存已折算的加急火力。
             session.flush()
             _activate_reservation(session, reservation, reservation.target_pig_id)
+            if reservation.status == "pending" and previous_required != reservation.protection_required:
+                reservation.waiting_notice = {"status": "pending"}

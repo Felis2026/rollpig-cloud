@@ -480,11 +480,13 @@ class RoastReservationClaimRequest(BaseModel):
     supports_protection_gathering: bool = False
     protection_gathering_version: int = 0
     excluded_reservation_ids: list[str] = Field(default_factory=list)
+    supports_waiting_notice: bool = False
 
 
 class RoastReservationClaimResponse(BaseModel):
     items: list[RoastReservationItem] = Field(default_factory=list)
     has_owned: bool = False
+    waiting_notices: list[RoastReservationItem] = Field(default_factory=list)
 
 
 class RoastReservationOutcomeRequest(BaseModel):
@@ -497,6 +499,10 @@ class RoastReservationOutcomeRequest(BaseModel):
 class RoastReservationMutationRequest(BaseModel):
     reservation_id: str
     claim_token: str
+
+
+class RoastWaitingNoticeRequest(RoastReservationMutationRequest):
+    action: Literal["sending", "sent", "release"]
 
 
 class RoastReservationCompleteRequest(RoastReservationMutationRequest):

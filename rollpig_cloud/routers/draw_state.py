@@ -12,5 +12,5 @@ router = APIRouter(prefix="/v1/draw-state", tags=["draw-state"], dependencies=[D
 
 
 @router.get("", response_model=DrawStateResponse)
-def get_draw_state(user_id: str, session: Session = Depends(get_session)):
+def get_draw_state(user_id: str, session: Session = Depends(get_session, scope="function")):
     return build_draw_state_response(session, user_id)

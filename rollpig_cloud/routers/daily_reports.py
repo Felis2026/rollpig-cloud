@@ -172,7 +172,7 @@ def _fail_delivery_if_unchanged(
 @router.post("/profiles", response_model=DailyReportProfileResponse)
 def get_daily_report_profiles(
     req: DailyReportProfileRequest,
-    session: Session = Depends(get_session),
+    session: Session = Depends(get_session, scope="function"),
 ) -> DailyReportProfileResponse:
     """批量返回固定截止点下的 EX、图鉴数量和可用小猪引用。"""
 
@@ -488,7 +488,7 @@ def _claim_once(
 @router.post("/claim", response_model=DailyReportClaimResponse)
 def claim_daily_reports(
     req: DailyReportClaimRequest,
-    session: Session = Depends(get_session),
+    session: Session = Depends(get_session, scope="function"),
 ):
     # 无行可锁时由日期群唯一键裁决；并发插入冲突后回滚并重查赢家创建的记录。
     for _ in range(3):
@@ -502,7 +502,7 @@ def claim_daily_reports(
 @router.post("/transition", response_model=DailyReportTransitionResponse)
 def transition_daily_report(
     req: DailyReportTransitionRequest,
-    session: Session = Depends(get_session),
+    session: Session = Depends(get_session, scope="function"),
 ):
     """推进发送边界；一旦进入 sending，租约失效也绝不能自动重领。"""
 

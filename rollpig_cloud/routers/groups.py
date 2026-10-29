@@ -15,7 +15,7 @@ router = APIRouter(prefix="/v1/groups", tags=["groups"], dependencies=[Depends(v
 
 
 @router.get("/active", response_model=ActiveGroupsResponse)
-def get_active_groups(date_str: dt.date, session: Session = Depends(get_session)):
+def get_active_groups(date_str: dt.date, session: Session = Depends(get_session, scope="function")):
     event_rows = session.execute(select(RoastEvent.group_id).where(RoastEvent.date_str == date_str)).all()
     roll_rows = session.execute(select(GroupRoll.group_id).where(GroupRoll.date_str == date_str)).all()
     group_ids = sorted({str(row[0]) for row in event_rows + roll_rows if row[0]})

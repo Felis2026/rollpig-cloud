@@ -236,6 +236,8 @@ class RoastReservation(Base):
     active_slot: Mapped[int | None] = mapped_column(Integer, nullable=True, default=1, server_default="1")
     protection_required: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     protection_source: Mapped[str] = mapped_column(String(16), nullable=False, default="legacy", server_default="legacy")
+    # 等待提示独立于开炉结果，保存领取租约与发送状态。
+    waiting_notice: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # 零表示尚未确认当前发送者支持保护合围，后续请求可补充能力记录。
     delivery_gathering_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     force_operator_id: Mapped[str] = mapped_column(String(64), nullable=False, default="", server_default="")
